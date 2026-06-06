@@ -43,13 +43,31 @@ This part stays manual until you want to invest in a custom unattended-install I
 
 ## Phase 3 — `bootstrap-pve.sh`
 
-The PVE web UI has a `>_ Shell` button on the node — open it and paste the script (or `wget` it from wherever you host it). It doesn't need any flags up front:
+Open the PVE web UI's `>_ Shell` on the node. The fastest way to get the script onto a fresh host is to fetch it directly from GitHub:
 
 ```bash
-./bootstrap-pve.sh --dry-run
+# Fetch + run interactively (process substitution keeps stdin free for prompts)
+bash <(curl -fsSL https://raw.githubusercontent.com/<your-github-user>/td-proxmox/main/automation/bootstrap-pve.sh) --dry-run
 ```
 
-It will prompt you to paste, in order:
+Or, equivalently, download then run — easier to debug, easier to re-run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<your-github-user>/td-proxmox/main/automation/bootstrap-pve.sh \
+  -o /root/bootstrap-pve.sh
+chmod +x /root/bootstrap-pve.sh
+/root/bootstrap-pve.sh --dry-run
+```
+
+> **Don't use `curl … | bash`.** The script is interactive — `bash` would consume stdin from the pipe, leaving nothing for the SSH-key/Tailscale-key/password prompts to read. Use process substitution `bash <(curl …)` or download-then-run instead.
+
+**Alternative paths** if you don't have GitHub access from the host (offline lab, restricted network, etc.):
+
+- `scp ~/td-proxmox/automation/bootstrap-pve.sh root@<pve-ip>:/root/` from your workstation.
+- Paste the script contents directly into `nano /root/bootstrap-pve.sh` in the web UI shell — it's ~6 KB, paste is instant.
+
+The script doesn't need any flags up front. It will prompt you to paste, in order:
+
 1. Your workstation's SSH **public** key (one line, starts with `ssh-...`).
 2. A Tailscale auth key (`tskey-auth-...`) — input hidden.
 3. A root password for the new CTs — input hidden, confirmed twice.
@@ -94,10 +112,19 @@ ollama pull gemma3:12b-cloud
 
 ## Phase 5 — `configure-apps.sh`
 
-Back on the PVE host:
+Back on the PVE host. By now Gitea is up, so you have two equally good sources for the script:
 
 ```bash
-./configure-apps.sh \
+# From GitHub (canonical, always reachable)
+curl -fsSL https://raw.githubusercontent.com/<your-github-user>/td-proxmox/main/automation/configure-apps.sh \
+  -o /root/configure-apps.sh
+
+# Or from your own Gitea (after you've pushed there too)
+curl -fsSL http://gitea:3000/td/td-proxmox/raw/branch/main/automation/configure-apps.sh \
+  -o /root/configure-apps.sh
+
+chmod +x /root/configure-apps.sh
+/root/configure-apps.sh \
   --admin-user      td \
   --admin-email     td@homelab.local \
   --admin-password  'something-strong' \
