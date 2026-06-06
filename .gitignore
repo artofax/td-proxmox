@@ -1,0 +1,9 @@
+# Whitelist approach — ignore everything in the repo root by default,
+# then opt-in to what we want tracked. Keeps the deck (.pptx),
+# screenshot library (figs/, install/), build artifacts, and any other
+# loose docs out of the repo unless they're explicitly un-ignored.
+
+/*
+!.gitignore
+!README.md
+!automation/
