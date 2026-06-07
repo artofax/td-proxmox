@@ -553,8 +553,23 @@ YAML'"
     target: _blank
 YAML'"
 
-  # Restart the service so the new config takes effect. The unit name varies
-  # by install method, so we try the most common ones.
+  # Drop a systemd override setting HOMEPAGE_ALLOWED_HOSTS=*. Homepage v0.10+
+  # validates the incoming Host header against an allowlist; community-scripts
+  # installs don't set one, so the default deployment rejects any access
+  # except 'localhost'. '*' accepts any Host — fine for a private homelab.
+  # Idempotent — re-runs no-op if the drop-in is already present.
+  log "  Allowing all Host headers (HOMEPAGE_ALLOWED_HOSTS=*)..."
+  run "pct exec $HOMEPAGE_CTID -- bash -lc '
+    mkdir -p /etc/systemd/system/homepage.service.d
+    cat > /etc/systemd/system/homepage.service.d/allowed-hosts.conf <<DROPIN
+[Service]
+Environment=\"HOMEPAGE_ALLOWED_HOSTS=*\"
+DROPIN
+    systemctl daemon-reload
+  '"
+
+  # Restart the service so the new config + drop-in take effect. The unit name
+  # varies by install method, so we try the most common ones.
   log "  Restarting Homepage service..."
   run "pct exec $HOMEPAGE_CTID -- bash -lc '
     systemctl restart homepage 2>/dev/null \
