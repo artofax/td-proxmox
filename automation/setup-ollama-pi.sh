@@ -94,22 +94,38 @@ install_ollama_in_ct() {
 # /usr/local/sbin. Without this fix, future shells say `bash: ollama:
 # command not found` even though the binary is right there.
 #
-# A drop-in in /etc/profile.d/ is sourced by every login shell, so future
-# `pct enter` sessions inherit the right PATH. Not Ollama-specific —
-# anything installed under /usr/local/bin/* would have the same problem,
-# so this fix is worth doing once per CT regardless of what's installed.
+# We write to TWO places to cover both shell-startup paths PVE might use:
+#   /etc/profile.d/usrlocal-path.sh  →  for login shells (sourced via /etc/profile)
+#   /etc/bash.bashrc                  →  for interactive non-login shells
+# `pct enter` on modern PVE typically spawns interactive non-login bash, so
+# /etc/bash.bashrc is the one that actually fires. The profile.d drop-in is
+# kept for forward compatibility (in case pct enter switches to login shells)
+# and as a safety net.
+#
+# Not Ollama-specific — anything installed under /usr/local/bin/* would have
+# the same problem (pi, kubectl, etc.), so this fix is worth doing once per
+# CT regardless of what's installed.
 ensure_usrlocal_path_in_ct() {
   local ctid="$1"
+
+  # 1. /etc/profile.d/ — login shells
   if pct exec "$ctid" -- test -f /etc/profile.d/usrlocal-path.sh 2>/dev/null; then
     log "  [$ctid] /etc/profile.d/usrlocal-path.sh already present."
-    return
+  else
+    log "  [$ctid] Adding /etc/profile.d/usrlocal-path.sh (login shells)..."
+    run "echo 'export PATH=\"/usr/local/sbin:/usr/local/bin:\$PATH\"' | pct exec $ctid -- tee /etc/profile.d/usrlocal-path.sh > /dev/null"
+    run "pct exec $ctid -- chmod 644 /etc/profile.d/usrlocal-path.sh"
   fi
-  log "  [$ctid] Adding /etc/profile.d/usrlocal-path.sh so pct enter sees /usr/local/bin..."
-  # Pipe via stdin so we don't have to wrestle with nested-quote escaping.
-  # The single-quoted echo body keeps $PATH literal — it's expanded by the
-  # shell that sources this file later, not by us writing it.
-  run "echo 'export PATH=\"/usr/local/sbin:/usr/local/bin:\$PATH\"' | pct exec $ctid -- tee /etc/profile.d/usrlocal-path.sh > /dev/null"
-  run "pct exec $ctid -- chmod 644 /etc/profile.d/usrlocal-path.sh"
+
+  # 2. /etc/bash.bashrc — interactive non-login shells (this is what pct enter
+  # actually triggers on most PVE versions). Append idempotently via a marker.
+  local marker="# TD-Proxmox: /usr/local in PATH for pct enter"
+  if pct exec "$ctid" -- grep -qF "$marker" /etc/bash.bashrc 2>/dev/null; then
+    log "  [$ctid] /etc/bash.bashrc already has the PATH override."
+  else
+    log "  [$ctid] Appending PATH override to /etc/bash.bashrc (interactive shells)..."
+    run "printf '\\n%s\\n%s\\n' '$marker' 'export PATH=\"/usr/local/sbin:/usr/local/bin:\$PATH\"' | pct exec $ctid -- tee -a /etc/bash.bashrc > /dev/null"
+  fi
 }
 
 # Drop a systemd override so the Ollama daemon binds 0.0.0.0:11434 instead of
