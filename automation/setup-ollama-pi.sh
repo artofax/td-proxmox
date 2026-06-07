@@ -76,7 +76,7 @@ log "Installing curl + zstd (prereqs)..."
 run "pct exec $PI_CTID -- bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y curl zstd'"
 
 # ----- 2. Ollama -------------------------------------------------------------
-if pct exec "$PI_CTID" -- command -v ollama >/dev/null 2>&1; then
+if pct exec "$PI_CTID" -- bash -lc 'command -v ollama' >/dev/null 2>&1; then
   log "Ollama already installed — skipping installer."
 else
   log "Installing Ollama..."
@@ -110,9 +110,10 @@ else
   echo
 
   if (( DRY_RUN )); then
-    printf "[dry-run] pct exec %s -- ollama signin\n" "$PI_CTID"
+    printf "[dry-run] pct exec %s -- bash -lc 'ollama signin'\n" "$PI_CTID"
   else
-    pct exec "$PI_CTID" -- ollama signin || die "ollama signin failed or was cancelled."
+    # bash -lc so /usr/local/bin (where Ollama installs) is on PATH.
+    pct exec "$PI_CTID" -- bash -lc 'ollama signin' || die "ollama signin failed or was cancelled."
   fi
   log "Pairing complete."
 fi
@@ -124,7 +125,7 @@ elif pct exec "$PI_CTID" -- bash -lc "ollama list 2>/dev/null | awk '\$1==\"$MOD
   log "Model $MODEL already pulled — skipping."
 else
   log "Pulling model $MODEL (this can take a while)..."
-  run "pct exec $PI_CTID -- ollama pull '$MODEL'"
+  run "pct exec $PI_CTID -- bash -lc 'ollama pull \"$MODEL\"'"
 fi
 
 # ----- 5. pi -----------------------------------------------------------------
