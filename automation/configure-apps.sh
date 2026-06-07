@@ -304,49 +304,98 @@ configure_gitea() {
 }
 
 # ----- OpenWebUI -------------------------------------------------------------
+# Helper: POST a JSON body to an OpenWebUI endpoint and capture both the body
+# and HTTP status, so we can distinguish "user already exists" from "endpoint
+# missing" from "service still starting" etc.
+_owui_post_json() {
+  local ctid="$1" path="$2" body="$3"
+  pct exec "$ctid" -- bash -lc "curl -sS -w '\nHTTP_STATUS:%{http_code}' \
+    -X POST 'http://127.0.0.1:8080$path' \
+    -H 'Content-Type: application/json' \
+    -d '$body'" 2>/dev/null || echo "HTTP_STATUS:000"
+}
+
+# Extract HTTP_STATUS and body from a combined response.
+_owui_parse_status() { echo "$1" | grep -oE 'HTTP_STATUS:[0-9]+' | tail -1 | cut -d: -f2; }
+_owui_parse_body()   { echo "$1" | sed '/^HTTP_STATUS:/d'; }
+
 configure_openwebui() {
   ct_up "$OPENWEBUI_CTID"
   log "Configuring OpenWebUI (CT $OPENWEBUI_CTID)..."
 
   wait_for_port_inside_ct "$OPENWEBUI_CTID" 8080 "OpenWebUI"
 
-  # All API calls happen inside the CT so we can hit localhost:8080 with no TLS hassle
-  exec_ow() { pct exec "$OPENWEBUI_CTID" -- bash -lc "$1"; }
-
-  # 1. Signup — first user becomes admin
-  log "  Creating admin user via signup..."
-  local SIGNUP_BODY
-  SIGNUP_BODY=$(printf '{"name":"%s","email":"%s","password":"%s","profile_image_url":"/user.png"}' \
-    "$ADMIN_USER" "$ADMIN_EMAIL" "$ADMIN_PASSWORD")
-  run "exec_ow 'curl -fsS -X POST http://127.0.0.1:8080/api/v1/auths/signup \
-                  -H \"Content-Type: application/json\" \
-                  -d '\\\''$SIGNUP_BODY'\\\'' >/tmp/owui_signup.json 2>/tmp/owui_signup.err || true'"
-
-  # 2. Login — get JWT
-  log "  Signing in to grab JWT..."
   local OWUI_TOKEN=""
-  if (( ! DRY_RUN )); then
-    local LOGIN_BODY
-    LOGIN_BODY=$(printf '{"email":"%s","password":"%s"}' "$ADMIN_EMAIL" "$ADMIN_PASSWORD")
-    OWUI_TOKEN="$(pct exec "$OPENWEBUI_CTID" -- bash -lc \
-      "curl -fsS -X POST http://127.0.0.1:8080/api/v1/auths/signin \
-            -H 'Content-Type: application/json' \
-            -d '$LOGIN_BODY' | python3 -c 'import sys,json; print(json.load(sys.stdin).get(\"token\",\"\"))' " || true)"
-    [[ -n "$OWUI_TOKEN" ]] || warn "  Could not retrieve OpenWebUI JWT — check signup result on the CT."
-  else
+
+  if (( DRY_RUN )); then
     OWUI_TOKEN="DRYRUN_OWUI_JWT"
+  else
+    # OpenWebUI's signup response includes the JWT directly — no need for a
+    # separate signin call on the happy path. We try signup first; if it
+    # returns 4xx (user already exists, etc.) we fall back to signin.
+    log "  Creating admin user via signup..."
+    local SIGNUP_BODY SIGNUP_RESP SIGNUP_STATUS SIGNUP_BODY_RESP
+    SIGNUP_BODY=$(printf '{"name":"%s","email":"%s","password":"%s","profile_image_url":"/user.png"}' \
+      "$ADMIN_USER" "$ADMIN_EMAIL" "$ADMIN_PASSWORD")
+    SIGNUP_RESP=$(_owui_post_json "$OPENWEBUI_CTID" "/api/v1/auths/signup" "$SIGNUP_BODY")
+    SIGNUP_STATUS=$(_owui_parse_status "$SIGNUP_RESP")
+    SIGNUP_BODY_RESP=$(_owui_parse_body "$SIGNUP_RESP")
+
+    if [[ "$SIGNUP_STATUS" == "200" || "$SIGNUP_STATUS" == "201" ]]; then
+      OWUI_TOKEN=$(echo "$SIGNUP_BODY_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)
+      log "  Admin user created. JWT obtained from signup response."
+    else
+      log "  Signup returned $SIGNUP_STATUS — likely user already exists. Trying signin..."
+      local SIGNIN_BODY SIGNIN_RESP SIGNIN_STATUS SIGNIN_BODY_RESP
+      SIGNIN_BODY=$(printf '{"email":"%s","password":"%s"}' "$ADMIN_EMAIL" "$ADMIN_PASSWORD")
+      SIGNIN_RESP=$(_owui_post_json "$OPENWEBUI_CTID" "/api/v1/auths/signin" "$SIGNIN_BODY")
+      SIGNIN_STATUS=$(_owui_parse_status "$SIGNIN_RESP")
+      SIGNIN_BODY_RESP=$(_owui_parse_body "$SIGNIN_RESP")
+      if [[ "$SIGNIN_STATUS" == "200" ]]; then
+        OWUI_TOKEN=$(echo "$SIGNIN_BODY_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)
+        log "  Signed in. JWT obtained."
+      else
+        warn "  Both signup ($SIGNUP_STATUS) and signin ($SIGNIN_STATUS) failed."
+        warn "  Signup body: $SIGNUP_BODY_RESP"
+        warn "  Signin body: $SIGNIN_BODY_RESP"
+      fi
+    fi
+
+    if [[ -z "$OWUI_TOKEN" ]]; then
+      warn "  Could not retrieve OpenWebUI JWT — skipping OpenRouter connection."
+      warn "  Recover by signing into http://<openwebui-ip>:8080 in a browser, then"
+      warn "  Settings → Connections → + on the OpenAI API row → URL https://openrouter.ai/api/v1"
+    fi
   fi
 
-  # 3. Add OpenRouter as an OpenAI-compatible connection.
-  # OpenWebUI's config endpoint takes the whole openai block; we read current, splice ours in, push back.
+  # Add OpenRouter as an OpenAI-compatible connection.
   if [[ -n "$OWUI_TOKEN" ]]; then
     log "  Adding OpenRouter connection..."
-    run "pct exec $OPENWEBUI_CTID -- bash -lc '
-      curl -fsS -X POST http://127.0.0.1:8080/api/config/openai \
-           -H \"Authorization: Bearer $OWUI_TOKEN\" \
-           -H \"Content-Type: application/json\" \
-           -d {\"OPENAI_API_BASE_URLS\":[\"https://openrouter.ai/api/v1\"],\"OPENAI_API_KEYS\":[\"$OPENROUTER_KEY\"],\"ENABLE_OPENAI_API\":true}
-    '"
+    local CONN_BODY
+    CONN_BODY=$(printf '{"OPENAI_API_BASE_URLS":["https://openrouter.ai/api/v1"],"OPENAI_API_KEYS":["%s"],"ENABLE_OPENAI_API":true}' \
+      "$OPENROUTER_KEY")
+    # Try the new endpoint first (recent OpenWebUI versions), then a couple of
+    # known older paths as fallbacks. Quiet on first failure.
+    if (( ! DRY_RUN )); then
+      local CONN_RESP CONN_STATUS path
+      for path in "/api/v1/configs/openai" "/api/config/openai" "/openai/config/update"; do
+        CONN_RESP=$(pct exec "$OPENWEBUI_CTID" -- bash -lc "curl -sS -w '\nHTTP_STATUS:%{http_code}' \
+          -X POST 'http://127.0.0.1:8080$path' \
+          -H 'Authorization: Bearer $OWUI_TOKEN' \
+          -H 'Content-Type: application/json' \
+          -d '$CONN_BODY'" 2>/dev/null || echo "HTTP_STATUS:000")
+        CONN_STATUS=$(_owui_parse_status "$CONN_RESP")
+        if [[ "$CONN_STATUS" =~ ^2 ]]; then
+          log "  OpenRouter connection added via $path (HTTP $CONN_STATUS)."
+          break
+        else
+          log "  $path returned $CONN_STATUS — trying next."
+        fi
+      done
+      [[ "$CONN_STATUS" =~ ^2 ]] || warn "  No OpenAI-config endpoint accepted the connection. Add OpenRouter manually in Settings → Connections."
+    else
+      printf "[dry-run] would POST OpenRouter connection to /api/v1/configs/openai (with fallbacks).\n"
+    fi
   fi
 
   OWUI_IP="$(pct exec "$OPENWEBUI_CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || echo "10.0.0.0")"
