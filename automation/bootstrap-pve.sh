@@ -565,28 +565,31 @@ run_helper_script() {
   # (no discrete GPU). Harmless no-op for helpers that don't reference
   # var_gpu (docker.sh, gitea.sh, homepage.sh). If you do have a GPU and
   # want OpenWebUI to use it, remove this line or set var_gpu=yes.
-  # Note: build.func's whitelist requires the var_* prefix. Earlier I was
-  # passing CT_TYPE / CT_ID / PW / SSH_AUTHORIZED_KEY which are the *internal*
-  # names build.func uses after mapping — they're silently ignored as env
-  # input. The real env-var names are:
+  # Note: build.func's whitelist requires the var_* prefix. The real env-var
+  # names are:
   #   var_ctid          → preferred CTID (helpers ignore CT_ID)
-  #   var_hostname      → CT hostname (also see pct set --hostname after)
-  #   var_cpu / var_ram / var_disk
+  #   var_hostname      → CT hostname
   #   var_pw            → root password
-  #   var_gpu=no        → skip OpenWebUI GPU passthrough
+  #   var_gpu=no        → skip OpenWebUI GPU passthrough setup
   #   var_ssh=yes       → enable SSH inside the CT
   #   var_ssh_authorized_key → key content; install.func writes to
   #                            /root/.ssh/authorized_keys on first boot
   #
-  # We still rely on push_pve_keys_to_ct as a safety net, since the helpers'
-  # whiptail menu may still let the user pick "Default Install" vs "Advanced",
-  # and the var_ssh_authorized_key path only fires when the menu doesn't
-  # override it.
+  # IMPORTANT: we do NOT pass var_cpu / var_ram / var_disk. Each helper has
+  # its own well-tuned defaults for its actual install footprint:
+  #   docker:    2 cpu / 2 GB RAM / 4 GB disk
+  #   gitea:     1 cpu / 1 GB RAM / 8 GB disk
+  #   openwebui: 4 cpu / 8 GB RAM / 50 GB disk  ← needs the headroom
+  #   homepage:  1 cpu / 1 GB RAM / 4 GB disk
+  # Overriding these globally is what caused OpenWebUI's install to fail
+  # mid-Intel-oneAPI when we squeezed disk down to 20 GB. If you want
+  # different sizes (e.g. small RAM box where 8 GB OpenWebUI is too much),
+  # add per-helper overrides via the HELPER_SCRIPTS array entries.
+  #
+  # push_pve_keys_to_ct still runs as a safety net for cases where the user
+  # picks 'Advanced Install' in the whiptail (which overrides our env).
   run "var_ctid=$CTID_PREF \
        var_hostname=$KEY \
-       var_cpu=$DEFAULT_CORES \
-       var_ram=$DEFAULT_MEMORY \
-       var_disk=$DEFAULT_DISK_GB \
        var_gpu=no \
        var_pw='$CT_PASSWORD' \
        var_ssh=yes \
