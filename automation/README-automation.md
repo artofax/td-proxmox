@@ -47,13 +47,13 @@ Open the PVE web UI's `>_ Shell` on the node. The fastest way to get the script 
 
 ```bash
 # Fetch + run interactively (process substitution keeps stdin free for prompts)
-bash <(curl -fsSL https://raw.githubusercontent.com/<your-github-user>/td-proxmox/main/automation/bootstrap-pve.sh) --dry-run
+bash <(curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/automation/bootstrap-pve.sh) --dry-run
 ```
 
 Or, equivalently, download then run — easier to debug, easier to re-run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-github-user>/td-proxmox/main/automation/bootstrap-pve.sh \
+curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/automation/bootstrap-pve.sh \
   -o /root/bootstrap-pve.sh
 chmod +x /root/bootstrap-pve.sh
 /root/bootstrap-pve.sh --dry-run
@@ -95,7 +95,7 @@ Idempotent. Safe to re-run — existing CTs are skipped.
 On the PVE host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-github-user>/td-proxmox/main/automation/setup-ollama-pi.sh \
+curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/automation/setup-ollama-pi.sh \
   -o /root/setup-ollama-pi.sh
 chmod +x /root/setup-ollama-pi.sh
 /root/setup-ollama-pi.sh
@@ -128,7 +128,7 @@ Back on the PVE host. By now Gitea is up, so you have two equally good sources f
 
 ```bash
 # From GitHub (canonical, always reachable)
-curl -fsSL https://raw.githubusercontent.com/<your-github-user>/td-proxmox/main/automation/configure-apps.sh \
+curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/automation/configure-apps.sh \
   -o /root/configure-apps.sh
 
 # Or from your own Gitea (after you've pushed there too)
