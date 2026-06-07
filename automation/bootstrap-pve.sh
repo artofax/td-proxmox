@@ -133,8 +133,75 @@ cleanup_tmp_keyfile() {
 }
 trap cleanup_tmp_keyfile EXIT
 
+# ----- CT state helpers (used both by preflight and the main loop) ----------
+ct_exists()    { pct status "$1" >/dev/null 2>&1; }
+ct_running()   { pct status "$1" 2>/dev/null | grep -q "status: running"; }
+ct_on_tailnet() {
+  # True if the container exists, is running, and has a 100.x tailnet IP.
+  ct_running "$1" || return 1
+  pct exec "$1" -- bash -lc '
+    command -v tailscale >/dev/null 2>&1 \
+      && tailscale ip -4 2>/dev/null | grep -q "^100\."
+  ' 2>/dev/null
+}
+
+# Iterate every CTID this run might touch.
+all_ctids() {
+  local c entry
+  for c in "${PCT_CREATE_CTS[@]}"; do echo "$c"; done
+  for entry in "${HELPER_SCRIPTS[@]}"; do
+    IFS='|' read -r c _ _ <<< "$entry"
+    echo "$c"
+  done
+}
+
+# Filter CTs by --only=key1,key2 (hostnames, comma-separated)
+selected_key() {
+  local key="$1"
+  if [[ -z "$ONLY" ]]; then return 0; fi
+  IFS=',' read -ra wanted <<< "$ONLY"
+  for w in "${wanted[@]}"; do [[ "$w" == "$key" ]] && return 0; done
+  return 1
+}
+
+# ----- preflight: figure out what work actually needs doing -----------------
+# Sets NEEDS_CT_PASSWORD and NEEDS_TS_AUTHKEY so the resolve_* functions can
+# skip prompting for inputs they won't end up using.
+preflight_state() {
+  CTS_TO_CREATE=()
+  CTS_NEED_TAILSCALE=()
+  CTS_ALREADY_DONE=()
+
+  if (( DRY_RUN )); then
+    # Don't poke at the host's actual state in dry-run; assume all work needed.
+    NEEDS_CT_PASSWORD=1
+    NEEDS_TS_AUTHKEY=1
+    log "Preflight: dry-run, assuming all work needs doing."
+    return
+  fi
+
+  local c key
+  for c in $(all_ctids); do
+    key="${CT_HOSTNAME[$c]}"
+    selected_key "$key" || continue
+    if ! ct_exists "$c"; then
+      CTS_TO_CREATE+=("$c")
+      CTS_NEED_TAILSCALE+=("$c")
+    elif ! ct_on_tailnet "$c"; then
+      CTS_NEED_TAILSCALE+=("$c")
+    else
+      CTS_ALREADY_DONE+=("$c")
+    fi
+  done
+
+  NEEDS_CT_PASSWORD=$(( ${#CTS_TO_CREATE[@]}     > 0 ))
+  NEEDS_TS_AUTHKEY=$((  ${#CTS_NEED_TAILSCALE[@]} > 0 ))
+
+  log "Preflight: ${#CTS_TO_CREATE[@]} CT(s) to create, ${#CTS_NEED_TAILSCALE[@]} need Tailscale join, ${#CTS_ALREADY_DONE[@]} already done."
+}
+
 # ----- resolve SSH public key -----------------------------------------------
-# Priority: --sshkey-file > --sshkey-text > interactive prompt.
+# Priority: --sshkey-file > --sshkey-text > existing /root/.ssh/authorized_keys > prompt.
 # Whichever path we take, end state: SSHKEY_FILE is a readable file on disk
 # (pct create wants a path, not a string).
 resolve_sshkey() {
@@ -144,6 +211,23 @@ resolve_sshkey() {
   fi
 
   if [[ -z "$SSHKEY_TEXT" ]]; then
+    # Reuse existing authorized_keys on re-runs — no prompt needed.
+    if [[ -s "$AUTHKEYS_FILE" ]]; then
+      log "SSH key already present in $AUTHKEYS_FILE — reusing (no prompt)."
+      SSHKEY_FILE="$AUTHKEYS_FILE"
+      return
+    fi
+
+    # Dry-run: skip the prompt with a placeholder.
+    if (( DRY_RUN )); then
+      TMP_SSHKEY_FILE="$(mktemp /tmp/bootstrap-sshkey.XXXXXX.pub)"
+      chmod 600 "$TMP_SSHKEY_FILE"
+      echo "ssh-ed25519 DRY_RUN_PLACEHOLDER dry@run" > "$TMP_SSHKEY_FILE"
+      SSHKEY_FILE="$TMP_SSHKEY_FILE"
+      log "Dry-run: using placeholder SSH key."
+      return
+    fi
+
     printf "\n\033[1;36m[bootstrap]\033[0m Paste your workstation's SSH PUBLIC key (one line, starts with ssh-...), then Enter:\n> " >&2
     IFS= read -r SSHKEY_TEXT
   fi
@@ -162,6 +246,20 @@ resolve_sshkey() {
 # ----- resolve Tailscale auth key -------------------------------------------
 resolve_tsauthkey() {
   if [[ -n "$TS_AUTHKEY" ]]; then return; fi
+
+  # Nothing to join? Don't ask.
+  if (( NEEDS_TS_AUTHKEY == 0 )); then
+    log "All target CTs already on tailnet — no Tailscale auth key needed."
+    TS_AUTHKEY="UNUSED_ALREADY_JOINED"
+    return
+  fi
+
+  if (( DRY_RUN )); then
+    TS_AUTHKEY="tskey-auth-DRY_RUN_PLACEHOLDER"
+    log "Dry-run: using placeholder Tailscale auth key."
+    return
+  fi
+
   printf "\n\033[1;36m[bootstrap]\033[0m Paste your Tailscale auth key (tskey-auth-...). Input hidden:\n> " >&2
   IFS= read -rs TS_AUTHKEY
   echo >&2
@@ -172,6 +270,20 @@ resolve_tsauthkey() {
 # ----- resolve root password for new CTs ------------------------------------
 resolve_ct_password() {
   if [[ -n "$CT_PASSWORD" ]]; then return; fi
+
+  # Nothing to create? Don't ask.
+  if (( NEEDS_CT_PASSWORD == 0 )); then
+    log "All target CTs already exist — no root password needed for this run."
+    CT_PASSWORD="UNUSED_NO_NEW_CTS"
+    return
+  fi
+
+  if (( DRY_RUN )); then
+    CT_PASSWORD="dry-run-placeholder-pw"
+    log "Dry-run: using placeholder CT password."
+    return
+  fi
+
   local pw1 pw2
   printf "\n\033[1;36m[bootstrap]\033[0m Set a root password for the new containers. Input hidden:\n> " >&2
   IFS= read -rs pw1; echo >&2
@@ -182,18 +294,10 @@ resolve_ct_password() {
   CT_PASSWORD="$pw1"
 }
 
+preflight_state
 resolve_sshkey
 resolve_tsauthkey
 resolve_ct_password
-
-# Filter CTs by --only=key1,key2
-selected_key() {
-  local key="$1"
-  if [[ -z "$ONLY" ]]; then return 0; fi
-  IFS=',' read -ra wanted <<< "$ONLY"
-  for w in "${wanted[@]}"; do [[ "$w" == "$key" ]] && return 0; done
-  return 1
-}
 
 # ----- 1. repos: enable no-subscription, disable enterprise ------------------
 configure_repos() {
@@ -267,7 +371,7 @@ ensure_template() {
 }
 
 # ----- 5. CT creation via pct ------------------------------------------------
-ct_exists() { pct status "$1" >/dev/null 2>&1; }
+# (ct_exists, ct_running, ct_on_tailnet defined earlier near the preflight)
 
 create_pct_ct() {
   local CTID="$1"
@@ -343,6 +447,15 @@ install_tailscale_in_ct() {
   local CTID="$1"
   local HOSTNAME="${CT_HOSTNAME[$CTID]}"
 
+  # Skip the whole step if this CT is already on the tailnet. Makes re-runs
+  # idempotent and means re-runs don't need a Tailscale auth key at all.
+  if (( ! DRY_RUN )) && ct_on_tailnet "$CTID"; then
+    local IP
+    IP="$(pct exec "$CTID" -- tailscale ip -4 2>/dev/null | head -n1 || echo '?')"
+    log "  CT $CTID ($HOSTNAME) already on tailnet at $IP — skipping Tailscale step."
+    return
+  fi
+
   log "Adding Tailscale to CT $CTID ($HOSTNAME)..."
   # The add-on script targets a CT and installs tailscaled inside it.
   run "CTID=$CTID bash -c \"\$(curl -fsSL '$TS_ADDON_URL')\""
@@ -369,7 +482,7 @@ install_tailscale_in_ct() {
 
 # ----- driver ----------------------------------------------------------------
 main() {
-  log "==> Bootstrap PVE: 4-CT homelab"
+  log "==> Bootstrap PVE: 5-CT homelab (ollama-pi-agent, docker, gitea, openwebui, homepage)"
 
   configure_repos
   apt_refresh
