@@ -136,13 +136,10 @@ curl -fsSL http://gitea:3000/td/td-proxmox/raw/branch/main/automation/configure-
   -o /root/configure-apps.sh
 
 chmod +x /root/configure-apps.sh
-/root/configure-apps.sh \
-  --admin-user      td \
-  --admin-email     td@homelab.local \
-  --admin-password  'something-strong' \
-  --openrouter-key  'sk-or-...' \
-  --dry-run
+/root/configure-apps.sh --dry-run
 ```
+
+The script prompts for the admin username, email, password (hidden + confirmed), and OpenRouter API key (hidden) at startup if they're not passed as flags — same interactive pattern as `bootstrap-pve.sh`. Pass them as `--admin-user td --admin-email ... --admin-password ... --openrouter-key ...` if you'd rather automate / drive from a vault helper.
 
 Drop `--dry-run` to commit. The script:
 

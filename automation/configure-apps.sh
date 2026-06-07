@@ -22,20 +22,30 @@
 #   - All issued secrets written to /root/td-tokens.txt on the PVE host (chmod 600).
 #   - Same secrets echoed at the end of the run.
 #
-# Usage:
+# Usage (zero flags — script prompts for everything it needs):
+#   ./configure-apps.sh
+#
+# Or pass any subset as flags:
 #   ./configure-apps.sh \
 #       --admin-user      td \
 #       --admin-email     td@homelab.local \
 #       --admin-password  'strong-pass' \
 #       --openrouter-key  'sk-or-...'
 #
-# Optional:
+# Required inputs (each can come from a flag OR an interactive prompt):
+#   --admin-user      Admin username for Gitea + OpenWebUI (e.g. td).
+#   --admin-email     Admin email (e.g. td@homelab.local).
+#   --admin-password  Hidden input, confirmed twice, >= 8 chars.
+#   --openrouter-key  Hidden input. Get from openrouter.ai → Keys → New Key.
+#                     Must start with sk-or-.
+#
+# Optional CT-ID overrides (otherwise resolved by hostname):
 #   --gitea-ctid 202        Override CT IDs if you used non-defaults
 #   --openwebui-ctid 100
 #   --pi-host-ctid 200      The ollama-pi-agent CT
 #   --homepage-ctid 110     The Homepage dashboard CT
 #   --only gitea,homepage   Subset of subsystems (gitea, openwebui, pi, homepage)
-#   --dry-run
+#   --dry-run               Preview commands; uses placeholders, skips prompts.
 
 set -Eeuo pipefail
 
@@ -86,10 +96,55 @@ run()  { if (( DRY_RUN )); then printf "[dry-run] %s\n" "$*"; else eval "$@"; fi
 [[ $EUID -eq 0 ]] || die "Run as root on the PVE host."
 command -v pct >/dev/null || die "pct not found — run this on the PVE host."
 
-[[ -n "$ADMIN_USER"     ]] || die "--admin-user is required."
-[[ -n "$ADMIN_EMAIL"    ]] || die "--admin-email is required."
-[[ -n "$ADMIN_PASSWORD" ]] || die "--admin-password is required."
-[[ -n "$OPENROUTER_KEY" ]] || die "--openrouter-key is required (from openrouter.ai → Keys)."
+# ----- resolve admin / API inputs (flag OR prompt) --------------------------
+# All four required inputs default to env / flag if passed, otherwise prompt
+# interactively. Password + OpenRouter key prompts hide input. Same pattern
+# as bootstrap-pve.sh — see resolve_sshkey / resolve_tsauthkey there.
+
+resolve_admin_user() {
+  if [[ -n "$ADMIN_USER" ]]; then return; fi
+  if (( DRY_RUN )); then ADMIN_USER="dryrunuser"; log "Dry-run: using placeholder admin user."; return; fi
+  printf "\n\033[1;36m[configure-apps]\033[0m Admin username for Gitea + OpenWebUI (e.g. td): " >&2
+  IFS= read -r ADMIN_USER
+  [[ -n "$ADMIN_USER" ]] || die "Admin user can't be empty."
+}
+
+resolve_admin_email() {
+  if [[ -n "$ADMIN_EMAIL" ]]; then return; fi
+  if (( DRY_RUN )); then ADMIN_EMAIL="dry@run.local"; log "Dry-run: using placeholder admin email."; return; fi
+  printf "\n\033[1;36m[configure-apps]\033[0m Admin email (e.g. td@homelab.local): " >&2
+  IFS= read -r ADMIN_EMAIL
+  [[ "$ADMIN_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] \
+    || die "That doesn't look like a valid email."
+}
+
+resolve_admin_password() {
+  if [[ -n "$ADMIN_PASSWORD" ]]; then return; fi
+  if (( DRY_RUN )); then ADMIN_PASSWORD="dryrun-placeholder-pw"; log "Dry-run: using placeholder admin password."; return; fi
+  local pw1 pw2
+  printf "\n\033[1;36m[configure-apps]\033[0m Admin password (hidden; min 8 chars): " >&2
+  IFS= read -rs pw1; echo >&2
+  printf "Confirm: " >&2
+  IFS= read -rs pw2; echo >&2
+  [[ "$pw1" == "$pw2"  ]] || die "Passwords didn't match."
+  [[ ${#pw1} -ge 8     ]] || die "Password too short (need >= 8 chars)."
+  ADMIN_PASSWORD="$pw1"
+}
+
+resolve_openrouter_key() {
+  if [[ -n "$OPENROUTER_KEY" ]]; then return; fi
+  if (( DRY_RUN )); then OPENROUTER_KEY="sk-or-DRY_RUN_PLACEHOLDER"; log "Dry-run: using placeholder OpenRouter key."; return; fi
+  printf "\n\033[1;36m[configure-apps]\033[0m OpenRouter API key (sk-or-... from openrouter.ai → Keys). Input hidden:\n> " >&2
+  IFS= read -rs OPENROUTER_KEY
+  echo >&2
+  [[ "$OPENROUTER_KEY" =~ ^sk-or- ]] \
+    || die "That doesn't look like an OpenRouter key (expected sk-or-...)."
+}
+
+resolve_admin_user
+resolve_admin_email
+resolve_admin_password
+resolve_openrouter_key
 
 selected() {
   local key="$1"

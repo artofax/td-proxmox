@@ -14,10 +14,8 @@ From `/root` on a fresh PVE install:
 ```bash
 ./bootstrap-pve.sh              # ~18 min — prompts for SSH key, Tailscale auth key, CT password
 ./setup-ollama-pi.sh            # ~5 min — Ollama + pi install, two browser clicks for device pairing
-./configure-apps.sh \
-  --admin-user td --admin-email td@homelab.local \
-  --admin-password '<strong>' --openrouter-key '<sk-or-…>'
-# (3 min — Gitea + OpenWebUI + Homepage all configured)
+./configure-apps.sh             # ~3 min — prompts for admin user/email/password + OpenRouter key
+# (Gitea + OpenWebUI + Homepage all configured)
 ```
 
 Hands-on time: roughly 10 minutes of the ~45-minute total.
