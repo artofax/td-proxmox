@@ -5,10 +5,11 @@
 # resumes automatically.
 #
 # Usage:
-#   ./setup-ollama-pi.sh                                  # auto-detect CT, default model
+#   ./setup-ollama-pi.sh                                  # auto-detect ollama-pi-agent, default model
 #   ./setup-ollama-pi.sh --model gemma3:31b-cloud         # different default model
-#   ./setup-ollama-pi.sh --ct-id 200                      # explicit CTID
+#   ./setup-ollama-pi.sh --ct-id 103 --skip-pi            # target a different CT, no pi install
 #   ./setup-ollama-pi.sh --skip-signin                    # install only, pair manually later
+#   ./setup-ollama-pi.sh --skip-pi                        # Ollama-only setup (no pi)
 #   ./setup-ollama-pi.sh --dry-run                        # preview commands
 #
 # What it does (in CT 200 by default):
@@ -30,6 +31,7 @@ PI_CTID=""
 DEFAULT_MODEL="gemma3:12b-cloud"
 MODEL=""
 SKIP_SIGNIN=0
+SKIP_PI=0
 DRY_RUN=0
 
 # ----- parse args ------------------------------------------------------------
@@ -38,8 +40,9 @@ while [[ $# -gt 0 ]]; do
     --ct-id)       PI_CTID="$2"; shift 2 ;;
     --model)       MODEL="$2"; shift 2 ;;
     --skip-signin) SKIP_SIGNIN=1; shift ;;
+    --skip-pi)     SKIP_PI=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
-    -h|--help)     sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -129,7 +132,9 @@ else
 fi
 
 # ----- 5. pi -----------------------------------------------------------------
-if pct exec "$PI_CTID" -- bash -lc 'command -v pi >/dev/null 2>&1 || ls /root/.local/share/pi-node/node-v*/bin/pi >/dev/null 2>&1'; then
+if (( SKIP_PI )); then
+  log "Skipping pi install (--skip-pi set)."
+elif pct exec "$PI_CTID" -- bash -lc 'command -v pi >/dev/null 2>&1 || ls /root/.local/share/pi-node/node-v*/bin/pi >/dev/null 2>&1'; then
   log "pi already installed — skipping installer."
 else
   log "Installing pi (answering Y to install Node.js + pi prompts)..."
@@ -139,20 +144,24 @@ else
 fi
 
 # ----- 6. PATH ---------------------------------------------------------------
-log "Setting up pi PATH in /root/.bashrc..."
-run "pct exec $PI_CTID -- bash -lc '
-  PI_BIN=\$(ls -d /root/.local/share/pi-node/node-v*/bin 2>/dev/null | head -1)
-  if [[ -n \"\$PI_BIN\" ]]; then
-    if ! grep -qF \"\$PI_BIN\" /root/.bashrc 2>/dev/null; then
-      echo \"export PATH=\\\"\$PI_BIN:\\\$PATH\\\"\" >> /root/.bashrc
-      echo \"  Added \$PI_BIN to /root/.bashrc\"
+if (( SKIP_PI )); then
+  log "Skipping PATH setup (no pi install)."
+else
+  log "Setting up pi PATH in /root/.bashrc..."
+  run "pct exec $PI_CTID -- bash -lc '
+    PI_BIN=\$(ls -d /root/.local/share/pi-node/node-v*/bin 2>/dev/null | head -1)
+    if [[ -n \"\$PI_BIN\" ]]; then
+      if ! grep -qF \"\$PI_BIN\" /root/.bashrc 2>/dev/null; then
+        echo \"export PATH=\\\"\$PI_BIN:\\\$PATH\\\"\" >> /root/.bashrc
+        echo \"  Added \$PI_BIN to /root/.bashrc\"
+      else
+        echo \"  PATH export already present in /root/.bashrc\"
+      fi
     else
-      echo \"  PATH export already present in /root/.bashrc\"
+      echo \"  Could not find /root/.local/share/pi-node/node-v*/bin — verify pi installed correctly\"
     fi
-  else
-    echo \"  Could not find /root/.local/share/pi-node/node-v*/bin — verify pi installed correctly\"
-  fi
-'"
+  '"
+fi
 
 # ----- 7. Verify -------------------------------------------------------------
 if (( ! DRY_RUN )); then
@@ -162,6 +171,10 @@ fi
 
 # ----- Done ------------------------------------------------------------------
 log "==> Done."
-log "To start pi:  pct enter $PI_CTID  &&  ollama launch pi"
-log "First time pi runs, ask it to add OpenRouter as a provider:"
-log "  \"add OpenRouter to your model providers using OPENROUTER_API_KEY from my env\""
+if (( SKIP_PI )); then
+  log "Ollama is set up on CT $PI_CTID. Verify with: pct exec $PI_CTID -- bash -lc 'ollama list'"
+else
+  log "To start pi:  pct enter $PI_CTID  &&  ollama launch pi"
+  log "First time pi runs, ask it to add OpenRouter as a provider:"
+  log "  \"add OpenRouter to your model providers using OPENROUTER_API_KEY from my env\""
+fi
