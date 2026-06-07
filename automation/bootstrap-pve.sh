@@ -148,6 +148,20 @@ ct_on_tailnet() {
   ' 2>/dev/null
 }
 
+# Snapshot of CTIDs that exist on the host. Used to detect what a helper
+# created (since most community-scripts auto-assign CTID, ignoring env vars),
+# AND to look up an existing CT by its hostname during preflight.
+_list_ctids() { pct list 2>/dev/null | awk 'NR>1 {print $1}' | sort; }
+
+find_ct_by_hostname() {
+  local want="$1" c hn
+  for c in $(_list_ctids); do
+    hn="$(pct config "$c" 2>/dev/null | awk '/^hostname:/ {print $2}')"
+    [[ "$hn" == "$want" ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
 # Iterate every CTID this run might touch.
 all_ctids() {
   local c entry
@@ -183,17 +197,26 @@ preflight_state() {
     return
   fi
 
-  local c key
+  local c key actual
   for c in $(all_ctids); do
     key="${CT_HOSTNAME[$c]}"
     selected_key "$key" || continue
-    if ! ct_exists "$c"; then
+
+    # First check if the preferred CTID exists. If not, fall back to looking
+    # up the CT by hostname (helper-script CTIDs drift from our static map).
+    if ct_exists "$c"; then
+      actual="$c"
+    else
+      actual="$(find_ct_by_hostname "$key" 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$actual" ]]; then
       CTS_TO_CREATE+=("$c")
       CTS_NEED_TAILSCALE+=("$c")
-    elif ! ct_on_tailnet "$c"; then
-      CTS_NEED_TAILSCALE+=("$c")
+    elif ! ct_on_tailnet "$actual"; then
+      CTS_NEED_TAILSCALE+=("$actual")
     else
-      CTS_ALREADY_DONE+=("$c")
+      CTS_ALREADY_DONE+=("$actual")
     fi
   done
 
@@ -478,21 +501,7 @@ TUN_BLOCK"
 # ----- 6. Helper-script CTs (Gitea, OpenWebUI) ------------------------------
 # Run inside the PVE host shell, but driven non-interactively where possible by
 # pre-exporting variables the community scripts respect.
-# Snapshot of CTIDs that exist on the host. Used to detect what a helper
-# created, since most community-scripts auto-assign CTID and ignore env vars.
-_list_ctids() { pct list 2>/dev/null | awk 'NR>1 {print $1}' | sort; }
-
-# Find a CT by its hostname. We use this to recover existing CTs across re-runs
-# when the helper-script-assigned CTID isn't predictable.
-find_ct_by_hostname() {
-  local want="$1" c
-  for c in $(_list_ctids); do
-    local hn
-    hn="$(pct config "$c" 2>/dev/null | awk '/^hostname:/ {print $2}')"
-    [[ "$hn" == "$want" ]] && { echo "$c"; return 0; }
-  done
-  return 1
-}
+# (_list_ctids + find_ct_by_hostname are defined earlier near the preflight.)
 
 run_helper_script() {
   # Note the CTID arg is now the PREFERRED id — the community helpers don't
