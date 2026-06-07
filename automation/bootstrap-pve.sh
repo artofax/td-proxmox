@@ -628,13 +628,13 @@ push_pve_keys_to_ct() {
     # filters out the stray '---' / 'your-email@example.com' artifacts that
     # accumulated from earlier paste attempts.
     if [[ ! "$key" =~ ^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-) ]]; then
-      ((skipped_non_key++))
+      skipped_non_key=$((skipped_non_key + 1))
       continue
     fi
 
     # Idempotency: skip if already there.
     if (( ! DRY_RUN )) && pct exec "$ctid" -- grep -qF "$key" /root/.ssh/authorized_keys 2>/dev/null; then
-      ((skipped_present++))
+      skipped_present=$((skipped_present + 1))
       continue
     fi
 
@@ -643,7 +643,7 @@ push_pve_keys_to_ct() {
     else
       printf '%s\n' "$key" | pct exec "$ctid" -- tee -a /root/.ssh/authorized_keys > /dev/null
     fi
-    ((added++))
+    added=$((added + 1))
   done < "$AUTHKEYS_FILE"
 
   log "  [$ctid] PVE-host keys synced: $added added, $skipped_present already present, $skipped_non_key non-key lines filtered out."
