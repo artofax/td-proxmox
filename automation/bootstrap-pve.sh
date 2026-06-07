@@ -241,11 +241,22 @@ resolve_sshkey() {
   fi
 
   if [[ -z "$SSHKEY_TEXT" ]]; then
-    # Reuse existing authorized_keys on re-runs — no prompt needed.
+    # PVE 9.x symlinks /root/.ssh/authorized_keys → /etc/pve/priv/authorized_keys
+    # and pre-populates the target with an auto-generated 'root@<hostname>' key
+    # for inter-node management. A plain '-s file' check sees that as "user has
+    # added their key" and would skip the prompt — leaving the user's actual
+    # workstation key uninstalled and unable to ssh in. So we only skip the
+    # prompt if we find at least one key whose comment isn't 'root@<this-host>'.
     if [[ -s "$AUTHKEYS_FILE" ]]; then
-      log "SSH key already present in $AUTHKEYS_FILE — reusing (no prompt)."
-      SSHKEY_FILE="$AUTHKEYS_FILE"
-      return
+      local self_host
+      self_host="$(hostname -s 2>/dev/null || hostname)"
+      if grep -E "^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-)" "$AUTHKEYS_FILE" 2>/dev/null \
+         | awk -v def="root@$self_host" '$NF != def { found=1 } END { exit !found }'; then
+        log "SSH key already present in $AUTHKEYS_FILE (non-PVE-default) — reusing (no prompt)."
+        SSHKEY_FILE="$AUTHKEYS_FILE"
+        return
+      fi
+      log "Only PVE auto-key (root@$self_host) found in $AUTHKEYS_FILE — will prompt for your workstation key."
     fi
 
     # Dry-run: skip the prompt with a placeholder.
