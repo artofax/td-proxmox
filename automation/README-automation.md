@@ -25,6 +25,7 @@ Phases 1 and 2 are the only fully-manual stops. Phase 4 has one browser click fo
 
 Have ready:
 
+- A computer with at least **120 GB of free disk** after the Proxmox install — the LXCs allocate roughly: ollama-pi-agent 20 GB + docker 4 GB + gitea 8 GB + openwebui 50 GB + homepage 4 GB (≈ 86 GB), plus the template cache (~600 MB) and headroom for models / Docker images. 256 GB SSD is comfortable; 128 GB will work but get tight.
 - A USB drive (8 GB+) with the Proxmox VE 9.1 ISO flashed via Balena Etcher.
 - An SSH keypair on your workstation. `ssh-keygen -t ed25519` if you don't have one.
 - An account at **tailscale.com** with an auth key minted in advance: admin console → Settings → Keys → Generate auth key → reusable, no expiry needed for first run.
