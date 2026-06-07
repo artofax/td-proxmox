@@ -203,13 +203,29 @@ configure_repos() {
   local ENT="/etc/apt/sources.list.d/pve-enterprise.list"
   local CEPH_ENT="/etc/apt/sources.list.d/ceph.list"
   local NOSUB="/etc/apt/sources.list.d/pve-no-subscription.list"
+  # PVE 9 also ships .sources (deb822) variants for some repos:
+  local ENT_SOURCES="/etc/apt/sources.list.d/pve-enterprise.sources"
+  local CEPH_ENT_SOURCES="/etc/apt/sources.list.d/ceph.sources"
 
-  if [[ -f "$ENT" ]] && ! grep -q "^#" "$ENT"; then
-    run "sed -i 's|^deb|# deb|' '$ENT'"
+  # PVE installers ship pve-enterprise.list with a header comment AND an active
+  # deb line — the right guard is "is there an UNCOMMENTED deb line?", not
+  # "does ANY comment exist?" (which always returns true and skips the disable).
+  if [[ -f "$ENT" ]] && grep -Eq "^deb[[:space:]]" "$ENT"; then
+    run "sed -i 's|^deb |# deb |' '$ENT'"
+    log "  Disabled $ENT"
   fi
-  if [[ -f "$CEPH_ENT" ]] && grep -q "enterprise.proxmox.com" "$CEPH_ENT" && ! grep -q "^# *deb.*enterprise" "$CEPH_ENT"; then
-    run "sed -i 's|^deb.*enterprise.*|# &|' '$CEPH_ENT'"
+  if [[ -f "$CEPH_ENT" ]] && grep -Eq "^deb[[:space:]].*enterprise" "$CEPH_ENT"; then
+    run "sed -i 's|^deb \\(.*enterprise.*\\)|# deb \\1|' '$CEPH_ENT'"
+    log "  Disabled enterprise line in $CEPH_ENT"
   fi
+  # New deb822 .sources files: flip Enabled: yes -> Enabled: no
+  for sf in "$ENT_SOURCES" "$CEPH_ENT_SOURCES"; do
+    if [[ -f "$sf" ]] && grep -Eq "^Enabled:[[:space:]]*yes" "$sf"; then
+      run "sed -i 's|^Enabled:.*yes|Enabled: no|' '$sf'"
+      log "  Disabled $sf"
+    fi
+  done
+
   if [[ ! -f "$NOSUB" ]]; then
     local CODENAME
     CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-trixie}")"
@@ -331,9 +347,17 @@ install_tailscale_in_ct() {
   # The add-on script targets a CT and installs tailscaled inside it.
   run "CTID=$CTID bash -c \"\$(curl -fsSL '$TS_ADDON_URL')\""
 
-  # CT may need a restart before tailscaled is happy
-  run "pct reboot $CTID || pct stop $CTID && pct start $CTID"
-  run "sleep 6"
+  # CT needs a restart before tailscaled is happy. The addon script just prints
+  # a "please reboot" message — it doesn't restart for us.
+  # The old `pct reboot ... || pct stop ... && pct start ...` chain was buggy:
+  # bash parses 'A || B && C' as '(A||B) && C', so a successful reboot would
+  # still try pct start while the CT was mid-boot, fail, and trip set -e.
+  # Just do stop+start explicitly — works on every PVE version, never races.
+  log "  Restarting CT $CTID so tailscaled picks up..."
+  run "pct stop $CTID >/dev/null 2>&1 || true"
+  run "sleep 2"
+  run "pct start $CTID"
+  run "sleep 8"
 
   # Bring tailscale up with the auth key. --hostname keeps node names tidy.
   log "  tailscale up --authkey ... --hostname $HOSTNAME"
