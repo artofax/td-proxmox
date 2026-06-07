@@ -3,7 +3,10 @@
 # ollama-pi-agent. Runs on the PVE host.
 #
 # Default behavior (no flags): walks the built-in target list, currently
-#   ollama-pi-agent   → install/verify Ollama, signin, pull model, install pi
+#   ollama-pi-agent   → install/verify Ollama, signin, pull model, install pi,
+#                       generate /root/.ssh/id_ed25519, push pubkey into
+#                       docker/gitea/openwebui/homepage so pi can ssh into
+#                       any of them passwordless
 #   openwebui         → install/verify Ollama, signin, pull model (no pi)
 # Idempotent at every step — re-runs only do work that isn't already done.
 #
@@ -37,6 +40,12 @@ DEFAULT_TARGETS=(
   "ollama-pi-agent:with-pi"
   "openwebui:no-pi"
 )
+
+# CTs that pi (running on the with-pi host) should be able to SSH into without
+# password. The script generates a keypair on the pi host, drops the pubkey
+# into each target's /root/.ssh/authorized_keys, and pre-trusts each target's
+# host key so the first connection doesn't prompt.
+SSH_TRUST_TARGETS=(docker gitea openwebui homepage)
 
 # ----- parse args ------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -196,6 +205,63 @@ pull_model_in_ct() {
   run "pct exec $ctid -- bash -lc 'ollama pull \"$MODEL\"'"
 }
 
+# Set up SSH trust from the pi host into the other service CTs, so pi can
+# `ssh root@docker` etc. without password or fingerprint prompts.
+#
+# Three things happen for each target:
+#   1. Generate /root/.ssh/id_ed25519 on the pi host (idempotent — keep
+#      existing key if present).
+#   2. Append the pi host's pubkey to the target CT's authorized_keys
+#      (skip if already there to avoid duplicates).
+#   3. Pre-populate the pi host's known_hosts with the target's ssh-keyscan
+#      output, dedup, so the first connection doesn't prompt.
+#
+# Targets come from the SSH_TRUST_TARGETS array at the top of the file.
+# Any target that doesn't exist as a CT is skipped silently with a log line.
+configure_ssh_trust_from_pi_host() {
+  local pi_ctid="$1"
+
+  log "  [$pi_ctid] Ensuring pi-host SSH key (/root/.ssh/id_ed25519)..."
+  run "pct exec $pi_ctid -- bash -lc 'mkdir -p /root/.ssh && chmod 700 /root/.ssh; [[ -f /root/.ssh/id_ed25519 ]] || ssh-keygen -t ed25519 -N \"\" -f /root/.ssh/id_ed25519 -C \"root@\$(hostname)\"'"
+
+  # Read the public key. In dry-run we don't need the real value, but the rest
+  # of the function still walks targets so the user sees what would happen.
+  local pi_pubkey=""
+  if (( DRY_RUN )); then
+    pi_pubkey="ssh-ed25519 DRYRUN_PLACEHOLDER root@ollama-pi-agent"
+  else
+    pi_pubkey="$(pct exec "$pi_ctid" -- cat /root/.ssh/id_ed25519.pub 2>/dev/null || true)"
+    if [[ -z "$pi_pubkey" ]]; then
+      warn "  Could not read pi host's public key — skipping trust setup."
+      return
+    fi
+  fi
+
+  log "  Authorizing pi key on the other service CTs..."
+  local target_hostname target_ctid
+  for target_hostname in "${SSH_TRUST_TARGETS[@]}"; do
+    target_ctid="$(find_ct_by_hostname "$target_hostname" 2>/dev/null || true)"
+    if [[ -z "$target_ctid" ]]; then
+      log "    [$target_hostname] no such CT — skipping."
+      continue
+    fi
+
+    # Skip if pi's pubkey is already in the target's authorized_keys.
+    if (( ! DRY_RUN )) \
+       && pct exec "$target_ctid" -- grep -qF "$pi_pubkey" /root/.ssh/authorized_keys 2>/dev/null; then
+      log "    [$target_hostname] pi key already authorized."
+    else
+      log "    [$target_hostname] adding pi pubkey to /root/.ssh/authorized_keys"
+      run "pct exec $target_ctid -- bash -lc 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys'"
+      run "echo '$pi_pubkey' | pct exec $target_ctid -- tee -a /root/.ssh/authorized_keys > /dev/null"
+    fi
+
+    # Pre-trust the target's host key so first ssh from pi doesn't prompt.
+    # sort -u dedupes if we've already keyscanned it on a previous run.
+    run "pct exec $pi_ctid -- bash -lc 'ssh-keyscan -H $target_hostname 2>/dev/null >> /root/.ssh/known_hosts || true; if [[ -s /root/.ssh/known_hosts ]]; then sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts; chmod 644 /root/.ssh/known_hosts; fi'"
+  done
+}
+
 install_pi_in_ct() {
   local ctid="$1"
   if pct exec "$ctid" -- bash -lc 'command -v pi >/dev/null 2>&1 || ls /root/.local/share/pi-node/node-v*/bin/pi >/dev/null 2>&1'; then
@@ -284,6 +350,7 @@ for entry in "${TARGETS[@]}"; do
 
   if [[ "$mode" == "with-pi" ]] && (( ! SKIP_PI )); then
     install_pi_in_ct "$ctid"
+    configure_ssh_trust_from_pi_host "$ctid"
   fi
 done
 
