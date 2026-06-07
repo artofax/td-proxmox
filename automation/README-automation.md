@@ -13,11 +13,11 @@ Total time from "USB plugged in" to "Homepage dashboard up": ~45 minutes, of whi
 | 1 | Flash USB, boot, install Proxmox | Manual (Etcher + BIOS + graphical installer) | 15 min |
 | 2 | First web UI login + grab the IP | Manual (browser) | 1 min |
 | 3 | `bootstrap-pve.sh` | One script on the PVE host | 18 min |
-| 4 | Pair Ollama device | Manual (one browser click) | 1 min |
+| 4 | `setup-ollama-pi.sh` | One script — Ollama + pi + one browser click to pair | 5 min |
 | 5 | `configure-apps.sh` | One script on the PVE host | 3 min |
 | 6 | pi prompts (the actual point) | Interactive in `ollama launch pi` | open-ended |
 
-Phases 1, 2, and 4 are the only manual stops. Everything else is a single command.
+Phases 1 and 2 are the only fully-manual stops. Phase 4 has one browser click for Ollama device pairing in the middle of an otherwise-automated script.
 
 ---
 
@@ -90,23 +90,27 @@ Idempotent. Safe to re-run — existing CTs are skipped.
 
 ---
 
-## Phase 4 — Ollama device pairing
+## Phase 4 — `setup-ollama-pi.sh`
 
-This is the only part that can't be eliminated without storing your Ollama session on disk. `pct enter 200` into ollama-pi-agent, then:
-
-```bash
-apt install -y curl zstd
-curl -fsSL https://ollama.com/install.sh | sh
-ollama signin
-```
-
-`ollama signin` prints a URL like `https://ollama.com/connect?name=ollama-pi&key=...`. Paste it into a browser where you're logged into ollama.com, click **Connect**. Done. Pull a model to confirm:
+On the PVE host:
 
 ```bash
-ollama pull gemma3:12b-cloud
+curl -fsSL https://raw.githubusercontent.com/<your-github-user>/td-proxmox/main/automation/setup-ollama-pi.sh \
+  -o /root/setup-ollama-pi.sh
+chmod +x /root/setup-ollama-pi.sh
+/root/setup-ollama-pi.sh
 ```
 
-(You can also install pi here with `curl -fsSL https://pi.dev/install.sh | sh` and the printed `export PATH=...` line, or leave it for later.)
+The script:
+
+1. Auto-detects the `ollama-pi-agent` CT (no flag needed).
+2. Installs `curl`, `zstd`, and Ollama via the official `install.sh`.
+3. Runs `ollama signin` — Ollama prints a URL like `https://ollama.com/connect?name=ollama-pi-agent&key=...` to your terminal. **Visit that URL in a browser where you're logged into ollama.com, click Connect, and the script resumes automatically.** This is the only place in the run where you leave the terminal.
+4. Pulls the default model (`gemma3:12b-cloud`, override with `--model …`).
+5. Installs pi from `pi.dev/install.sh`, answering Y to its prompts.
+6. Detects the Node.js bin path and appends `PATH` to `/root/.bashrc`.
+
+Idempotent — if Ollama or pi is already installed, those steps skip. If you want to install Ollama/pi but skip the browser pairing for now, pass `--skip-signin`.
 
 ---
 
@@ -181,6 +185,7 @@ In rough order of effort vs payoff:
 TD-Proxmox/
 ├── automation/
 │   ├── bootstrap-pve.sh        # Phase 3
+│   ├── setup-ollama-pi.sh      # Phase 4
 │   ├── configure-apps.sh       # Phase 5
 │   └── README-automation.md    # This file
 ├── follow-along-guide.md       # The manual walkthrough (source of truth for what each phase does)
