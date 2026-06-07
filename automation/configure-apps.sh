@@ -193,12 +193,17 @@ gitea_first_run_setup() {
   local ctid="$1"
   local ip="$2"
 
-  if gitea_install_lock_on "$ctid"; then
+  if (( ! DRY_RUN )) && gitea_install_lock_on "$ctid"; then
     log "  Gitea install lock already set — first-run setup skipped."
     return
   fi
 
-  log "  First-run wizard detected. POSTing /install (SQLite3, default paths)..."
+  if (( DRY_RUN )); then
+    log "  [dry-run] Would POST /install (SQLite3, default paths) and wait for app.ini."
+    log "  [dry-run] Skipping the real verification loop so dry-run can finish."
+  else
+    log "  First-run wizard detected. POSTing /install (SQLite3, default paths)..."
+  fi
 
   # The form expects URL-encoded fields. We feed them through curl --data-urlencode
   # so the server sees the same shape as the browser would. The fields below
@@ -232,6 +237,9 @@ gitea_first_run_setup() {
        --data-urlencode 'no_reply_address=noreply.localhost' \
        --data-urlencode 'password_algorithm=pbkdf2' \
        -o /dev/null"
+
+  # Dry-run never actually POSTs, so don't wait for state that won't change.
+  if (( DRY_RUN )); then return; fi
 
   # Wait for app.ini to appear (Gitea writes it during the install POST, then
   # restarts itself; can take a few seconds).
