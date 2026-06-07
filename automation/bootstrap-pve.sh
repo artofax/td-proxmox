@@ -577,6 +577,60 @@ run_helper_script() {
   CREATED_CTID="$new_ctid"
 }
 
+# Push the PVE host's authorized_keys into a CT.
+#
+# Why this exists: pct create --ssh-public-keys honors the file natively, so
+# pct-created CTs (ollama-pi-agent) get the key automatically. But the
+# community helper scripts (docker, gitea, openwebui, homepage) don't reliably
+# honor the SSH_AUTHORIZED_KEY env var in Default Install mode — they were
+# leaving CTs with no workstation key, so `ssh root@docker` from the laptop
+# would prompt for a password.
+#
+# This function reads the PVE host's authorized_keys, filters to lines that
+# look like real SSH public keys (drops blanks, comments, and stray markdown
+# / YAML separators that have crept in during pastes), and appends any
+# missing key into the target CT. Idempotent: re-runs skip already-present
+# keys via grep -F.
+push_pve_keys_to_ct() {
+  local ctid="$1"
+  if [[ ! -s "$AUTHKEYS_FILE" ]]; then
+    warn "  $AUTHKEYS_FILE is empty — nothing to push."
+    return
+  fi
+
+  # Make sure the target's .ssh dir + authorized_keys exist with correct perms.
+  run "pct exec $ctid -- bash -lc 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys'"
+
+  local key added=0 skipped_non_key=0 skipped_present=0
+  while IFS= read -r key; do
+    # Skip blanks and comment lines
+    [[ -z "$key" ]] && continue
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    # Skip anything that isn't a recognized OpenSSH public-key line. This
+    # filters out the stray '---' / 'your-email@example.com' artifacts that
+    # accumulated from earlier paste attempts.
+    if [[ ! "$key" =~ ^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-) ]]; then
+      ((skipped_non_key++))
+      continue
+    fi
+
+    # Idempotency: skip if already there.
+    if (( ! DRY_RUN )) && pct exec "$ctid" -- grep -qF "$key" /root/.ssh/authorized_keys 2>/dev/null; then
+      ((skipped_present++))
+      continue
+    fi
+
+    if (( DRY_RUN )); then
+      printf "[dry-run] would append key to CT %s: %s\n" "$ctid" "$(echo "$key" | awk '{print $NF}')"
+    else
+      printf '%s\n' "$key" | pct exec "$ctid" -- tee -a /root/.ssh/authorized_keys > /dev/null
+    fi
+    ((added++))
+  done < "$AUTHKEYS_FILE"
+
+  log "  [$ctid] PVE-host keys synced: $added added, $skipped_present already present, $skipped_non_key non-key lines filtered out."
+}
+
 # ----- 7. Direct Tailscale install inside CT (no addon script) --------------
 # The community addon (tools/addon/add-tailscale-lxc.sh) explicitly whiptail-
 # prompts for CTID even when we pass it via env, which is unsafe to script.
@@ -692,6 +746,10 @@ main() {
     local KEY="${CT_HOSTNAME[$CTID]}"
     selected_key "$KEY" || { log "Skipping $KEY ($CTID) (not in --only)"; continue; }
     create_pct_ct "$CTID"
+    # pct create's --ssh-public-keys flag already injected the host's keys,
+    # but pushing again is idempotent and acts as a safety net for re-runs
+    # where the user added keys to the PVE host after the CT was created.
+    push_pve_keys_to_ct "$CTID"
     install_tailscale_in_ct "$CTID"
   done
 
@@ -704,7 +762,12 @@ main() {
     selected_key "$KEY" || { log "Skipping $KEY ($CTID) (not in --only)"; continue; }
     CREATED_CTID=""
     run_helper_script "$CTID" "$KEY" "$URL" || { warn "Helper for $KEY failed — skipping."; continue; }
-    [[ -n "$CREATED_CTID" ]] && install_tailscale_in_ct "$CREATED_CTID"
+    if [[ -n "$CREATED_CTID" ]]; then
+      # Helper CTs need this explicitly — community scripts in Default Install
+      # mode skip the SSH_AUTHORIZED_KEY env var entirely.
+      push_pve_keys_to_ct "$CREATED_CTID"
+      install_tailscale_in_ct "$CREATED_CTID"
+    fi
   done
 
   log "==> Done."
