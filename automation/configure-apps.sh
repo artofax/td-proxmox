@@ -288,11 +288,16 @@ configure_gitea() {
   log "  Minting access token (name: pi-agent)..."
   GITEA_TOKEN=""
   if (( ! DRY_RUN )); then
+    # Gitea's success message is one of:
+    #   "Access token was successfully created: <hex>"   (newer versions)
+    #   "Access token: <hex>"                            (older versions)
+    # Both have the token as the last field, so use $NF rather than splitting
+    # on ': ' (which broke for the newer format — $2 = "was successfully created").
     GITEA_TOKEN="$(pct exec "$GITEA_CTID" -- bash -lc "sudo -u $GITEA_USER gitea admin user generate-access-token \
         --username '$ADMIN_USER' \
         --token-name 'pi-agent' \
         --scopes 'all' \
-        --config $GITEA_CONFIG 2>/dev/null | awk -F': ' '/^Access token/{print \$2}'" || true)"
+        --config $GITEA_CONFIG 2>/dev/null | awk '/^Access token/{print \$NF}'" || true)"
     if [[ -z "$GITEA_TOKEN" ]]; then
       warn "  Token generation returned empty — token may already exist with this name. Re-run with a fresh --token-name or revoke in Gitea UI."
     fi

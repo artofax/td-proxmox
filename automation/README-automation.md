@@ -101,7 +101,7 @@ chmod +x /root/setup-ollama-pi.sh
 /root/setup-ollama-pi.sh
 ```
 
-The script walks both `ollama-pi-agent` (CT 200) and `openwebui` (CT 103) automatically. For each:
+The script walks both `ollama-pi-agent` and `openwebui` automatically (resolved by hostname — actual CTIDs depend on what the community helpers auto-assigned). For each:
 
 1. Installs `curl`, `zstd`, and Ollama via the official `install.sh` (skip if already installed).
 2. Runs `ollama signin` — Ollama prints a URL like `https://ollama.com/connect?name=<hostname>&key=...` to your terminal. **Visit it in a browser logged into ollama.com, click Connect, and the script resumes.** Two browser clicks per fresh host — once for each CT.
@@ -200,4 +200,12 @@ TD-Proxmox/
 └── Proxmox VE Installation.pptx   # Slide deck for live presentation
 ```
 
-Both scripts support `--dry-run`, `--only <subset>`, and `--help`. Read the header comment at the top of each for the full flag list.
+All three scripts support `--dry-run` and `--help`. The `--only` flag accepts different key sets depending on the script:
+
+| Script | `--only` accepts | Example |
+|---|---|---|
+| `bootstrap-pve.sh` | hostnames | `--only ollama-pi-agent,gitea` |
+| `setup-ollama-pi.sh` | (use `--ct-id` instead) | `--ct-id 200` |
+| `configure-apps.sh` | subsystem names | `--only gitea,openwebui,pi,homepage` |
+
+Read the header comment at the top of each script for the full flag list.

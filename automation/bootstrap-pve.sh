@@ -45,8 +45,11 @@
 set -Eeuo pipefail
 
 # ----- defaults --------------------------------------------------------------
-TEMPLATE_NAME="debian-12-standard_12.12-1_amd64.tar.zst"
-TEMPLATE_REF="local:vztmpl/${TEMPLATE_NAME}"
+# TEMPLATE_NAME is resolved at runtime via ensure_template() — we ask pveam for
+# the latest available debian-12-standard build. Pinning a version string here
+# would 404 the next time Proxmox bumps the point release (12.12-1 → 12.13-1).
+TEMPLATE_NAME=""
+TEMPLATE_REF=""
 STORAGE_DISK="local-lvm"
 BRIDGE="vmbr0"
 
@@ -449,12 +452,27 @@ install_pve_sshkey() {
 
 # ----- 4. Debian template (pveam) -------------------------------------------
 ensure_template() {
+  # Resolve the latest debian-12-standard build at runtime — pinning a
+  # version (e.g. 12.12-1) would break when Proxmox bumps point releases.
+  if [[ -z "$TEMPLATE_NAME" ]]; then
+    run "pveam update >/dev/null"
+    if (( DRY_RUN )); then
+      TEMPLATE_NAME="debian-12-standard_<latest>_amd64.tar.zst"
+    else
+      TEMPLATE_NAME="$(pveam available --section system 2>/dev/null \
+        | awk '/debian-12-standard.*amd64\.tar\.zst/ {print $2}' \
+        | sort -V | tail -1)"
+    fi
+    [[ -n "$TEMPLATE_NAME" ]] || die "Could not find a debian-12-standard template via pveam available."
+    TEMPLATE_REF="local:vztmpl/${TEMPLATE_NAME}"
+    log "Resolved latest Debian 12 template: $TEMPLATE_NAME"
+  fi
+
   log "Ensuring template is downloaded: $TEMPLATE_NAME"
   if pveam list local 2>/dev/null | grep -q "$TEMPLATE_NAME"; then
     log "  (template already present)"
     return
   fi
-  run "pveam update"
   run "pveam download local '$TEMPLATE_NAME'"
 }
 
