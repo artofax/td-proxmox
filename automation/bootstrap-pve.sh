@@ -548,9 +548,16 @@ run_helper_script() {
   # Run the helper. We still pass env vars that ARE honored (var_cpu, var_ram,
   # var_disk, etc.) and SSH_AUTHORIZED_KEY which most helpers respect.
   # We do NOT try to dictate CT_ID — most helpers ignore it.
+  #
+  # var_gpu=no: openwebui.sh defaults to yes and triggers a multi-minute
+  # CUDA/GPU support install that's wasted on the typical homelab box
+  # (no discrete GPU). Harmless no-op for helpers that don't reference
+  # var_gpu (docker.sh, gitea.sh, homepage.sh). If you do have a GPU and
+  # want OpenWebUI to use it, remove this line or set var_gpu=yes.
   run "var_cpu=$DEFAULT_CORES \
        var_ram=$DEFAULT_MEMORY \
        var_disk=$DEFAULT_DISK_GB \
+       var_gpu=no \
        PW='$CT_PASSWORD' \
        SSH_AUTHORIZED_KEY=\"\$(cat '$AUTHKEYS_FILE')\" \
        bash -c \"\$(curl -fsSL '$URL')\""
