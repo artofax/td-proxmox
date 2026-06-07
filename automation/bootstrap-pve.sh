@@ -565,12 +565,32 @@ run_helper_script() {
   # (no discrete GPU). Harmless no-op for helpers that don't reference
   # var_gpu (docker.sh, gitea.sh, homepage.sh). If you do have a GPU and
   # want OpenWebUI to use it, remove this line or set var_gpu=yes.
-  run "var_cpu=$DEFAULT_CORES \
+  # Note: build.func's whitelist requires the var_* prefix. Earlier I was
+  # passing CT_TYPE / CT_ID / PW / SSH_AUTHORIZED_KEY which are the *internal*
+  # names build.func uses after mapping — they're silently ignored as env
+  # input. The real env-var names are:
+  #   var_ctid          → preferred CTID (helpers ignore CT_ID)
+  #   var_hostname      → CT hostname (also see pct set --hostname after)
+  #   var_cpu / var_ram / var_disk
+  #   var_pw            → root password
+  #   var_gpu=no        → skip OpenWebUI GPU passthrough
+  #   var_ssh=yes       → enable SSH inside the CT
+  #   var_ssh_authorized_key → key content; install.func writes to
+  #                            /root/.ssh/authorized_keys on first boot
+  #
+  # We still rely on push_pve_keys_to_ct as a safety net, since the helpers'
+  # whiptail menu may still let the user pick "Default Install" vs "Advanced",
+  # and the var_ssh_authorized_key path only fires when the menu doesn't
+  # override it.
+  run "var_ctid=$CTID_PREF \
+       var_hostname=$KEY \
+       var_cpu=$DEFAULT_CORES \
        var_ram=$DEFAULT_MEMORY \
        var_disk=$DEFAULT_DISK_GB \
        var_gpu=no \
-       PW='$CT_PASSWORD' \
-       SSH_AUTHORIZED_KEY=\"\$(cat '$AUTHKEYS_FILE')\" \
+       var_pw='$CT_PASSWORD' \
+       var_ssh=yes \
+       var_ssh_authorized_key=\"\$(cat '$AUTHKEYS_FILE')\" \
        bash -c \"\$(curl -fsSL '$URL')\""
 
   # Detect the new CTID by diffing pct list before vs after.
