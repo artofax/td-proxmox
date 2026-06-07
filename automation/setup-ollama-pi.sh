@@ -86,6 +86,32 @@ install_ollama_in_ct() {
   run "pct exec $ctid -- bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y curl zstd && curl -fsSL https://ollama.com/install.sh | sh'"
 }
 
+# Make `ollama` (and anything else under /usr/local/bin) reachable from
+# future `pct enter` shells.
+#
+# Ollama installs to /usr/local/bin/ollama, which is normally on PATH — but
+# `pct enter` uses a sanitized PATH that drops /usr/local/bin and
+# /usr/local/sbin. Without this fix, future shells say `bash: ollama:
+# command not found` even though the binary is right there.
+#
+# A drop-in in /etc/profile.d/ is sourced by every login shell, so future
+# `pct enter` sessions inherit the right PATH. Not Ollama-specific —
+# anything installed under /usr/local/bin/* would have the same problem,
+# so this fix is worth doing once per CT regardless of what's installed.
+ensure_usrlocal_path_in_ct() {
+  local ctid="$1"
+  if pct exec "$ctid" -- test -f /etc/profile.d/usrlocal-path.sh 2>/dev/null; then
+    log "  [$ctid] /etc/profile.d/usrlocal-path.sh already present."
+    return
+  fi
+  log "  [$ctid] Adding /etc/profile.d/usrlocal-path.sh so pct enter sees /usr/local/bin..."
+  # Pipe via stdin so we don't have to wrestle with nested-quote escaping.
+  # The single-quoted echo body keeps $PATH literal — it's expanded by the
+  # shell that sources this file later, not by us writing it.
+  run "echo 'export PATH=\"/usr/local/sbin:/usr/local/bin:\$PATH\"' | pct exec $ctid -- tee /etc/profile.d/usrlocal-path.sh > /dev/null"
+  run "pct exec $ctid -- chmod 644 /etc/profile.d/usrlocal-path.sh"
+}
+
 # Drop a systemd override so the Ollama daemon binds 0.0.0.0:11434 instead of
 # the default 127.0.0.1:11434. This lets other tailnet devices and other LXCs
 # (e.g. OpenWebUI) hit http://<hostname>:11434/ as an API endpoint. The CLI
@@ -225,6 +251,10 @@ for entry in "${TARGETS[@]}"; do
   log "============================================================"
 
   install_ollama_in_ct "$ctid"
+
+  # Make /usr/local/bin reachable from future pct enter shells. Applies to
+  # every CT (not just with-pi) since both have Ollama installed there.
+  ensure_usrlocal_path_in_ct "$ctid"
 
   # On the "primary" Ollama host (with-pi), expose the daemon on 0.0.0.0:11434
   # so it's reachable from OpenWebUI, pi running on the host, or any other
