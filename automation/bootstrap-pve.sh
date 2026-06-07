@@ -202,12 +202,13 @@ preflight_state() {
     key="${CT_HOSTNAME[$c]}"
     selected_key "$key" || continue
 
-    # First check if the preferred CTID exists. If not, fall back to looking
-    # up the CT by hostname (helper-script CTIDs drift from our static map).
-    if ct_exists "$c"; then
+    # Look up by HOSTNAME first — the static CTID map drifts as helper scripts
+    # auto-assign IDs. The previous version trusted the static CTID and could
+    # confuse one CT's state for another's (e.g., 'is openwebui on tailnet?'
+    # answered against CT 100 which is actually docker).
+    actual="$(find_ct_by_hostname "$key" 2>/dev/null || true)"
+    if [[ -z "$actual" ]] && ct_exists "$c"; then
       actual="$c"
-    else
-      actual="$(find_ct_by_hostname "$key" 2>/dev/null || true)"
     fi
 
     if [[ -z "$actual" ]]; then
@@ -577,6 +578,15 @@ install_tailscale_in_ct() {
     IP="$(pct exec "$CTID" -- tailscale ip -4 2>/dev/null | head -n1 || echo '?')"
     log "  CT $CTID ($HOSTNAME) already on tailnet at $IP — skipping Tailscale step."
     return
+  fi
+
+  # Guard: never forward a placeholder auth key to tailscale up. If the
+  # preflight wrongly skipped the prompt, fail clearly rather than letting
+  # Tailscale reject the bogus key and leave the node half-configured.
+  if [[ "$TS_AUTHKEY" =~ ^UNUSED_ ]] || [[ "$TS_AUTHKEY" =~ DRY_RUN_PLACEHOLDER ]]; then
+    die "CT $CTID ($HOSTNAME) needs Tailscale join but no real auth key was provided.
+  Re-run with: TS_AUTHKEY='' /root/bootstrap-pve.sh
+or pass it via flag: /root/bootstrap-pve.sh --tsauthkey tskey-auth-..."
   fi
 
   log "Installing Tailscale in CT $CTID ($HOSTNAME) — direct install."
