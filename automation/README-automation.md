@@ -101,16 +101,23 @@ chmod +x /root/setup-ollama-pi.sh
 /root/setup-ollama-pi.sh
 ```
 
-The script:
+The script walks both `ollama-pi-agent` (CT 200) and `openwebui` (CT 103) automatically. For each:
 
-1. Auto-detects the `ollama-pi-agent` CT (no flag needed).
-2. Installs `curl`, `zstd`, and Ollama via the official `install.sh`.
-3. Runs `ollama signin` — Ollama prints a URL like `https://ollama.com/connect?name=ollama-pi-agent&key=...` to your terminal. **Visit that URL in a browser where you're logged into ollama.com, click Connect, and the script resumes automatically.** This is the only place in the run where you leave the terminal.
-4. Pulls the default model (`gemma3:12b-cloud`, override with `--model …`).
-5. Installs pi from `pi.dev/install.sh`, answering Y to its prompts.
-6. Detects the Node.js bin path and appends `PATH` to `/root/.bashrc`.
+1. Installs `curl`, `zstd`, and Ollama via the official `install.sh` (skip if already installed).
+2. Runs `ollama signin` — Ollama prints a URL like `https://ollama.com/connect?name=<hostname>&key=...` to your terminal. **Visit it in a browser logged into ollama.com, click Connect, and the script resumes.** Two browser clicks per fresh host — once for each CT.
+3. Pulls the default model (`gemma3:12b-cloud`, override with `--model …`).
+4. On `ollama-pi-agent` only: installs pi from `pi.dev/install.sh` and appends the Node.js bin to `PATH` in `/root/.bashrc`.
 
-Idempotent — if Ollama or pi is already installed, those steps skip. If you want to install Ollama/pi but skip the browser pairing for now, pass `--skip-signin`.
+Idempotent at every step — re-runs detect what's already installed (Ollama binary, model pulled, pi installed, PATH already set) and skip cleanly. So if anything fails partway, just re-run.
+
+**Flags for unusual cases:**
+
+- `--ct-id N` — target only that CT instead of both
+- `--skip-pi` — set up Ollama everywhere, skip pi install entirely
+- `--skip-signin` — install Ollama but don't pair (you'll pair manually later)
+- `--model gemma3:31b-cloud` — different default model
+
+After this phase, `openwebui` chat dropdown lists local Ollama models alongside OpenRouter, and `ollama launch pi` works inside `ollama-pi-agent`.
 
 ---
 
