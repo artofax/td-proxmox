@@ -40,10 +40,14 @@
 set -Eeuo pipefail
 
 # ----- defaults --------------------------------------------------------------
-GITEA_CTID=202
-OPENWEBUI_CTID=100
-PI_HOST_CTID=200    # The ollama-pi-agent container — where pi runs.
-HOMEPAGE_CTID=110   # The Homepage dashboard container.
+# CTIDs are looked up by HOSTNAME at startup (see resolve_ctids below). The
+# community helper scripts auto-assign IDs that don't match our preferred
+# numbers, so trusting static values silently misroutes work into the wrong CT.
+# Hardcoded values here are only fallback "preferred" IDs and CLI override slots.
+GITEA_CTID=""
+OPENWEBUI_CTID=""
+PI_HOST_CTID=""
+HOMEPAGE_CTID=""
 
 ADMIN_USER=""
 ADMIN_EMAIL=""
@@ -99,6 +103,42 @@ ct_up() {
   local CTID="$1"
   pct status "$CTID" 2>/dev/null | grep -q "status: running" \
     || die "CT $CTID is not running. Run bootstrap-pve.sh first."
+}
+
+# Find a CT by its hostname (since bootstrap-pve.sh sets these correctly even
+# when the underlying CTID drifts from our preferred numbers).
+find_ct_by_hostname() {
+  local want="$1" c hn
+  for c in $(pct list 2>/dev/null | awk 'NR>1 {print $1}'); do
+    hn="$(pct config "$c" 2>/dev/null | awk '/^hostname:/ {print $2}')"
+    [[ "$hn" == "$want" ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+# Resolve each app to its actual CTID at startup. Honors CLI overrides; falls
+# back to a hostname lookup; dies clearly if the CT isn't found.
+resolve_ctids() {
+  local missing=()
+
+  if [[ -z "$GITEA_CTID" ]];     then GITEA_CTID="$(find_ct_by_hostname gitea     2>/dev/null || true)"; fi
+  if [[ -z "$OPENWEBUI_CTID" ]]; then OPENWEBUI_CTID="$(find_ct_by_hostname openwebui 2>/dev/null || true)"; fi
+  if [[ -z "$PI_HOST_CTID" ]];   then PI_HOST_CTID="$(find_ct_by_hostname ollama-pi-agent 2>/dev/null || true)"; fi
+  if [[ -z "$HOMEPAGE_CTID" ]];  then HOMEPAGE_CTID="$(find_ct_by_hostname homepage   2>/dev/null || true)"; fi
+
+  # Only complain about the subsystems we're actually going to touch.
+  selected gitea     && [[ -z "$GITEA_CTID"     ]] && missing+=("gitea")
+  selected openwebui && [[ -z "$OPENWEBUI_CTID" ]] && missing+=("openwebui")
+  selected pi        && [[ -z "$PI_HOST_CTID"   ]] && missing+=("ollama-pi-agent")
+  selected homepage  && [[ -z "$HOMEPAGE_CTID"  ]] && missing+=("homepage")
+
+  if (( ${#missing[@]} > 0 )); then
+    die "Could not find CT(s) with hostname(s): ${missing[*]}.
+  Run 'pct list' and confirm each CT exists and is named correctly.
+  You can also pass explicit IDs via --gitea-ctid / --openwebui-ctid / --pi-host-ctid / --homepage-ctid."
+  fi
+
+  log "Resolved CTIDs: gitea=${GITEA_CTID:-skip}  openwebui=${OPENWEBUI_CTID:-skip}  pi-host=${PI_HOST_CTID:-skip}  homepage=${HOMEPAGE_CTID:-skip}"
 }
 
 # Wait for a TCP port inside a CT to be answering.
@@ -394,6 +434,7 @@ TOKENS"
 # ----- driver ----------------------------------------------------------------
 main() {
   log "==> Configure apps: Gitea + OpenWebUI + pi (ollama-pi-agent) + Homepage"
+  resolve_ctids
   selected gitea     && configure_gitea
   selected openwebui && configure_openwebui
   selected pi        && configure_pi_host
