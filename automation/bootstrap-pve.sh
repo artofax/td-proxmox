@@ -660,8 +660,18 @@ or pass it via flag: /root/bootstrap-pve.sh --tsauthkey tskey-auth-..."
   '"
 
   # Step 4: tailscale up with the auth key (idempotent).
+  #
+  # Note: we intentionally do NOT pass --ssh. Tailscale SSH intercepts
+  # connections between tailnet devices and requires per-connection 'check
+  # mode' approval (or explicit ACL rules) before letting root in — which
+  # breaks the standard-SSHD + authorized_keys trust mesh that
+  # setup-ollama-pi.sh builds. By leaving Tailscale SSH off, regular sshd
+  # inside each CT handles connections, and our key-based trust works as
+  # designed. Trade-off: no Tailscale audit log for SSH; users who want that
+  # can flip --ssh back on AND configure their tailnet ACLs to permit
+  # 'autogroup:owner' SSH access to these tagged devices.
   log "  tailscale up --authkey ... --hostname $HOSTNAME"
-  run "pct exec $CTID -- tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME --accept-routes --ssh \
+  run "pct exec $CTID -- tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME --accept-routes \
        || pct exec $CTID -- tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME"
 
   # Show the 100.x for our final summary.
