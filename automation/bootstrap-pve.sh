@@ -92,7 +92,10 @@ HELPER_SCRIPTS=(
   "110|homepage|https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/homepage.sh"
 )
 # Tailscale add-on (run against an existing CT)
-TS_ADDON_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/tools/addon/add-tailscale-lxc.sh"
+# NOTE: community add-tailscale-lxc.sh whiptail-prompts for CTID even when
+# CTID env var is set, so we install Tailscale directly via pct exec instead
+# (see install_tailscale_in_ct below). Variable kept here for documentation only.
+# TS_ADDON_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/tools/addon/add-tailscale-lxc.sh"
 
 # ----- parse args ------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -475,41 +478,91 @@ TUN_BLOCK"
 # ----- 6. Helper-script CTs (Gitea, OpenWebUI) ------------------------------
 # Run inside the PVE host shell, but driven non-interactively where possible by
 # pre-exporting variables the community scripts respect.
-run_helper_script() {
-  local CTID="$1" KEY="$2" URL="$3"
+# Snapshot of CTIDs that exist on the host. Used to detect what a helper
+# created, since most community-scripts auto-assign CTID and ignore env vars.
+_list_ctids() { pct list 2>/dev/null | awk 'NR>1 {print $1}' | sort; }
 
-  if ct_exists "$CTID"; then
-    log "  CT $CTID ($KEY) already exists — skipping helper install."
+# Find a CT by its hostname. We use this to recover existing CTs across re-runs
+# when the helper-script-assigned CTID isn't predictable.
+find_ct_by_hostname() {
+  local want="$1" c
+  for c in $(_list_ctids); do
+    local hn
+    hn="$(pct config "$c" 2>/dev/null | awk '/^hostname:/ {print $2}')"
+    [[ "$hn" == "$want" ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+run_helper_script() {
+  # Note the CTID arg is now the PREFERRED id — the community helpers don't
+  # honor CT_ID env vars, so we just let them auto-assign and detect.
+  local CTID_PREF="$1" KEY="$2" URL="$3"
+
+  # If a CT with this hostname already exists, re-use it.
+  local existing
+  existing="$(find_ct_by_hostname "$KEY" 2>/dev/null || true)"
+  if [[ -n "$existing" ]]; then
+    log "  Found existing CT $existing with hostname '$KEY' — skipping helper, will use it."
+    CREATED_CTID="$existing"
     return
   fi
 
-  log "Installing $KEY via community-scripts.org (CT $CTID) — keys sourced from $AUTHKEYS_FILE"
-  # The community scripts read VAR=value from env when var_install is sourced;
-  # this gives us non-interactive defaults. See the script header for the full list.
-  # SSH_AUTHORIZED_KEY gets the entire authorized_keys file (newline-joined),
-  # so any keys you've added on the PVE host land in the CT too.
-  run "CT_TYPE=1 \
+  log "Installing $KEY via community-scripts.org (preferred CTID $CTID_PREF, may differ)..."
+  log "  Note: the helper may show whiptail menus. Pick 'Default Install' unless"
+  log "  you want to override the CTID via Advanced — either is fine, the script"
+  log "  detects whichever CT actually gets created."
+
+  # Snapshot before
+  local before_ctids
+  before_ctids="$(_list_ctids)"
+
+  # Run the helper. We still pass env vars that ARE honored (var_cpu, var_ram,
+  # var_disk, etc.) and SSH_AUTHORIZED_KEY which most helpers respect.
+  # We do NOT try to dictate CT_ID — most helpers ignore it.
+  run "var_cpu=$DEFAULT_CORES \
+       var_ram=$DEFAULT_MEMORY \
+       var_disk=$DEFAULT_DISK_GB \
        PW='$CT_PASSWORD' \
-       CT_ID=$CTID \
-       HN='$KEY' \
-       DISK_SIZE=$DEFAULT_DISK_GB \
-       CORE_COUNT=$DEFAULT_CORES \
-       RAM_SIZE=$DEFAULT_MEMORY \
-       BRG='$BRIDGE' \
-       NET=dhcp \
-       SSH=yes \
        SSH_AUTHORIZED_KEY=\"\$(cat '$AUTHKEYS_FILE')\" \
-       VERBOSE=no \
        bash -c \"\$(curl -fsSL '$URL')\""
+
+  # Detect the new CTID by diffing pct list before vs after.
+  local after_ctids new_ctid
+  after_ctids="$(_list_ctids)"
+  new_ctid="$(comm -13 <(echo "$before_ctids") <(echo "$after_ctids") | head -n1)"
+
+  if [[ -z "$new_ctid" ]]; then
+    warn "No new CT detected after $KEY helper. It may have been cancelled in the menu."
+    CREATED_CTID=""
+    return 1
+  fi
+
+  log "  Helper created CT $new_ctid for '$KEY'."
+
+  # Force our preferred hostname (helper's default might be different)
+  if [[ "$(pct config "$new_ctid" 2>/dev/null | awk '/^hostname:/ {print $2}')" != "$KEY" ]]; then
+    run "pct set $new_ctid --hostname $KEY"
+    log "  Renamed CT $new_ctid hostname to '$KEY'."
+  fi
+
+  CREATED_CTID="$new_ctid"
 }
 
-# ----- 7. Tailscale add-on + tailscale up inside CT --------------------------
+# ----- 7. Direct Tailscale install inside CT (no addon script) --------------
+# The community addon (tools/addon/add-tailscale-lxc.sh) explicitly whiptail-
+# prompts for CTID even when we pass it via env, which is unsafe to script.
+# We do the same work the addon does, but targeted at the CTID we know.
 install_tailscale_in_ct() {
   local CTID="$1"
-  local HOSTNAME="${CT_HOSTNAME[$CTID]}"
 
-  # Skip the whole step if this CT is already on the tailnet. Makes re-runs
-  # idempotent and means re-runs don't need a Tailscale auth key at all.
+  # Lookup hostname from the CT itself rather than our static map, since the
+  # helper may have created a CT we now know about by its detected ID.
+  local HOSTNAME
+  HOSTNAME="$(pct config "$CTID" 2>/dev/null | awk '/^hostname:/ {print $2}')"
+  HOSTNAME="${HOSTNAME:-ct$CTID}"
+
+  # Skip if already on the tailnet — makes re-runs free.
   if (( ! DRY_RUN )) && ct_on_tailnet "$CTID"; then
     local IP
     IP="$(pct exec "$CTID" -- tailscale ip -4 2>/dev/null | head -n1 || echo '?')"
@@ -517,27 +570,64 @@ install_tailscale_in_ct() {
     return
   fi
 
-  log "Adding Tailscale to CT $CTID ($HOSTNAME)..."
-  # The add-on script targets a CT and installs tailscaled inside it.
-  run "CTID=$CTID bash -c \"\$(curl -fsSL '$TS_ADDON_URL')\""
+  log "Installing Tailscale in CT $CTID ($HOSTNAME) — direct install."
 
-  # CT needs a restart before tailscaled is happy. The addon script just prints
-  # a "please reboot" message — it doesn't restart for us.
-  # The old `pct reboot ... || pct stop ... && pct start ...` chain was buggy:
-  # bash parses 'A || B && C' as '(A||B) && C', so a successful reboot would
-  # still try pct start while the CT was mid-boot, fail, and trip set -e.
-  # Just do stop+start explicitly — works on every PVE version, never races.
-  log "  Restarting CT $CTID so tailscaled picks up..."
+  # Step 1: Allow /dev/net/tun inside the unprivileged CT (this is the only
+  # LXC config change the addon makes).
+  local CONF="/etc/pve/lxc/${CTID}.conf"
+  if [[ ! -f "$CONF" ]]; then
+    warn "  Config file $CONF doesn't exist — was CT $CTID actually created?"
+    return 1
+  fi
+  if ! grep -q "lxc.cgroup2.devices.allow: c 10:200 rwm" "$CONF" 2>/dev/null; then
+    run "echo 'lxc.cgroup2.devices.allow: c 10:200 rwm' >> '$CONF'"
+  fi
+  if ! grep -q "lxc.mount.entry: /dev/net/tun" "$CONF" 2>/dev/null; then
+    run "echo 'lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file' >> '$CONF'"
+  fi
+
+  # Step 2: Restart CT so the new LXC config takes effect.
+  log "  Restarting CT $CTID so /dev/net/tun is mapped..."
   run "pct stop $CTID >/dev/null 2>&1 || true"
   run "sleep 2"
   run "pct start $CTID"
   run "sleep 8"
 
-  # Bring tailscale up with the auth key. --hostname keeps node names tidy.
-  log "  tailscale up --authkey ... --hostname $HOSTNAME"
-  run "pct exec $CTID -- bash -lc 'tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME --accept-routes --ssh || tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME'"
+  # Step 3: Install the tailscale package inside the CT.
+  log "  Installing tailscale package..."
+  run "pct exec $CTID -- bash -c '
+    set -e
+    if [ -f /etc/alpine-release ]; then
+      ALPINE_VERSION=\$(cat /etc/alpine-release | cut -d. -f1,2)
+      grep -q \"^[^#].*community\" /etc/apk/repositories 2>/dev/null \
+        || echo \"https://dl-cdn.alpinelinux.org/alpine/v\${ALPINE_VERSION}/community\" >> /etc/apk/repositories
+      apk update
+      apk add --no-cache tailscale
+      rc-update add tailscale default 2>/dev/null || true
+      rc-service tailscale start 2>/dev/null || true
+    else
+      export DEBIAN_FRONTEND=noninteractive
+      . /etc/os-release
+      if ! command -v curl >/dev/null 2>&1; then
+        apt-get update -qq
+        apt-get install -y curl
+      fi
+      mkdir -p /usr/share/keyrings
+      curl -fsSL \"https://pkgs.tailscale.com/stable/\$ID/\$VERSION_CODENAME.noarmor.gpg\" \
+        | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+      echo \"deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/\$ID \$VERSION_CODENAME main\" \
+        > /etc/apt/sources.list.d/tailscale.list
+      apt-get update -qq
+      apt-get install -y tailscale
+    fi
+  '"
 
-  # Show the assigned 100.x address for the summary at the end
+  # Step 4: tailscale up with the auth key (idempotent).
+  log "  tailscale up --authkey ... --hostname $HOSTNAME"
+  run "pct exec $CTID -- tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME --accept-routes --ssh \
+       || pct exec $CTID -- tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME"
+
+  # Show the 100.x for our final summary.
   run "pct exec $CTID -- tailscale ip -4 || true"
 }
 
@@ -558,12 +648,16 @@ main() {
     install_tailscale_in_ct "$CTID"
   done
 
-  # Helper-script CTs
+  # Helper-script CTs. We treat the CTID in the array as PREFERRED — the
+  # community helpers ignore env-var CT_ID overrides, so we let them auto-assign
+  # and then pick up the actual CTID via run_helper_script (which sets the
+  # global CREATED_CTID).
   for entry in "${HELPER_SCRIPTS[@]}"; do
     IFS='|' read -r CTID KEY URL <<< "$entry"
     selected_key "$KEY" || { log "Skipping $KEY ($CTID) (not in --only)"; continue; }
-    run_helper_script "$CTID" "$KEY" "$URL"
-    install_tailscale_in_ct "$CTID"
+    CREATED_CTID=""
+    run_helper_script "$CTID" "$KEY" "$URL" || { warn "Helper for $KEY failed — skipping."; continue; }
+    [[ -n "$CREATED_CTID" ]] && install_tailscale_in_ct "$CREATED_CTID"
   done
 
   log "==> Done."
