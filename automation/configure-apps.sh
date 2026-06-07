@@ -368,33 +368,38 @@ configure_openwebui() {
     fi
   fi
 
-  # Add OpenRouter as an OpenAI-compatible connection.
+  # Add OpenRouter as an OpenAI-compatible connection via /openai/config/update.
+  # Schema (OpenAIConfigForm) requires: OPENAI_API_BASE_URLS, OPENAI_API_KEYS,
+  # OPENAI_API_CONFIGS. The fourth field ENABLE_OPENAI_API is optional but we
+  # set it explicitly so the new connection actually shows up in the chat.
+  #
+  # OPENAI_API_CONFIGS is a dict keyed by the URL index (0, 1, ...) where each
+  # value is a per-connection settings object. An empty {} satisfies the
+  # required-field constraint and OpenWebUI fills defaults. If you want
+  # per-connection tags/prefix/model filtering you'd populate it here.
   if [[ -n "$OWUI_TOKEN" ]]; then
-    log "  Adding OpenRouter connection..."
+    log "  Adding OpenRouter connection (POST /openai/config/update)..."
     local CONN_BODY
-    CONN_BODY=$(printf '{"OPENAI_API_BASE_URLS":["https://openrouter.ai/api/v1"],"OPENAI_API_KEYS":["%s"],"ENABLE_OPENAI_API":true}' \
+    CONN_BODY=$(printf '{"OPENAI_API_BASE_URLS":["https://openrouter.ai/api/v1"],"OPENAI_API_KEYS":["%s"],"OPENAI_API_CONFIGS":{},"ENABLE_OPENAI_API":true}' \
       "$OPENROUTER_KEY")
-    # Try the new endpoint first (recent OpenWebUI versions), then a couple of
-    # known older paths as fallbacks. Quiet on first failure.
     if (( ! DRY_RUN )); then
-      local CONN_RESP CONN_STATUS path
-      for path in "/api/v1/configs/openai" "/api/config/openai" "/openai/config/update"; do
-        CONN_RESP=$(pct exec "$OPENWEBUI_CTID" -- bash -lc "curl -sS -w '\nHTTP_STATUS:%{http_code}' \
-          -X POST 'http://127.0.0.1:8080$path' \
-          -H 'Authorization: Bearer $OWUI_TOKEN' \
-          -H 'Content-Type: application/json' \
-          -d '$CONN_BODY'" 2>/dev/null || echo "HTTP_STATUS:000")
-        CONN_STATUS=$(_owui_parse_status "$CONN_RESP")
-        if [[ "$CONN_STATUS" =~ ^2 ]]; then
-          log "  OpenRouter connection added via $path (HTTP $CONN_STATUS)."
-          break
-        else
-          log "  $path returned $CONN_STATUS — trying next."
-        fi
-      done
-      [[ "$CONN_STATUS" =~ ^2 ]] || warn "  No OpenAI-config endpoint accepted the connection. Add OpenRouter manually in Settings → Connections."
+      local CONN_RESP CONN_STATUS CONN_BODY_RESP
+      CONN_RESP=$(pct exec "$OPENWEBUI_CTID" -- bash -lc "curl -sS -w '\nHTTP_STATUS:%{http_code}' \
+        -X POST 'http://127.0.0.1:8080/openai/config/update' \
+        -H 'Authorization: Bearer $OWUI_TOKEN' \
+        -H 'Content-Type: application/json' \
+        -d '$CONN_BODY'" 2>/dev/null || echo "HTTP_STATUS:000")
+      CONN_STATUS=$(_owui_parse_status "$CONN_RESP")
+      CONN_BODY_RESP=$(_owui_parse_body "$CONN_RESP")
+      if [[ "$CONN_STATUS" =~ ^2 ]]; then
+        log "  OpenRouter connection added (HTTP $CONN_STATUS)."
+      else
+        warn "  /openai/config/update returned $CONN_STATUS."
+        warn "  Body: $CONN_BODY_RESP"
+        warn "  Add OpenRouter manually: Settings → Connections → + on OpenAI API row."
+      fi
     else
-      printf "[dry-run] would POST OpenRouter connection to /api/v1/configs/openai (with fallbacks).\n"
+      printf "[dry-run] would POST OpenRouter connection to /openai/config/update.\n"
     fi
   fi
 
