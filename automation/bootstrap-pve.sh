@@ -300,20 +300,88 @@ resolve_tsauthkey
 resolve_ct_password
 
 # ----- 1. repos: enable no-subscription, disable enterprise ------------------
+# Reference: community-scripts.org tools/pve/post-pve-install.sh handles this
+# cleanly across PVE 8 (.list) and PVE 9 (.sources / deb822). We follow the
+# same approach: pick the format based on what's on disk, then operate.
+#
+# Key gotchas from PVE 9:
+#   - Default state has NO `Enabled:` line in .sources files (implicit true),
+#     so a simple sed s/yes/false/ does nothing. Need to APPEND `Enabled: false`
+#     if no Enabled line exists, otherwise replace.
+#   - The marker for "is this the enterprise repo" is `Components: pve-enterprise`
+#     and similarly `Components: ... ceph-... enterprise` for Ceph, not the URI.
+#   - Repo filenames vary (pve-enterprise.sources, proxmox.sources, etc.) so
+#     we scan all .sources files rather than guessing the name.
+
+# Helper: ensure a .sources file is disabled. Replaces existing Enabled: line,
+# or appends one if none exists.
+_disable_sources_file() {
+  local file="$1"
+  if grep -q "^Enabled:" "$file" 2>/dev/null; then
+    run "sed -i 's|^Enabled:.*|Enabled: false|' '$file'"
+  else
+    run "printf 'Enabled: false\n' >> '$file'"
+  fi
+}
+
 configure_repos() {
   (( SKIP_REPOS )) && { log "Skipping repo step (--skip-repos)"; return; }
   log "Configuring APT repos: enable pve-no-subscription, disable enterprise."
 
+  # Detect format. PVE 9.1 default is deb822 .sources files; older PVE 8 uses .list.
+  local has_sources=0
+  if find /etc/apt/sources.list.d/ -maxdepth 1 -name '*.sources' 2>/dev/null | grep -q .; then
+    has_sources=1
+  fi
+
+  if (( has_sources )); then
+    # ----- PVE 9 / deb822 path ----------------------------------------------
+    log "  Detected deb822 (.sources) format — using PVE 9 path."
+
+    # Disable any .sources file that declares Components: pve-enterprise
+    local file
+    for file in /etc/apt/sources.list.d/*.sources; do
+      [[ -f "$file" ]] || continue
+      if grep -Eq "^[^#]*Components:[^#]*\bpve-enterprise\b" "$file"; then
+        _disable_sources_file "$file"
+        log "  Disabled pve-enterprise in $file"
+      fi
+    done
+
+    # Disable Ceph enterprise (matches URI 'enterprise.proxmox.com' near 'ceph-')
+    for file in /etc/apt/sources.list.d/*.sources; do
+      [[ -f "$file" ]] || continue
+      if grep -Eq "URIs:.*enterprise\.proxmox\.com.*ceph|URIs:.*ceph.*enterprise\.proxmox\.com" "$file" \
+         || grep -Eq "^[^#]*Components:[^#]*\bceph.*enterprise\b" "$file"; then
+        _disable_sources_file "$file"
+        log "  Disabled ceph enterprise in $file"
+      fi
+    done
+
+    # Add pve-no-subscription if no .sources file already declares it
+    if ! grep -lEq "^[^#]*Components:[^#]*\bpve-no-subscription\b" /etc/apt/sources.list.d/*.sources 2>/dev/null; then
+      local CODENAME
+      CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-trixie}")"
+      run "cat > /etc/apt/sources.list.d/proxmox.sources <<SRC
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: $CODENAME
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+SRC"
+      log "  Added pve-no-subscription as deb822 (/etc/apt/sources.list.d/proxmox.sources)"
+    else
+      log "  pve-no-subscription already declared in a .sources file — leaving as is."
+    fi
+    return
+  fi
+
+  # ----- PVE 8 / .list path (kept for back-compat) --------------------------
+  log "  Using legacy .list format (PVE 8 style)."
   local ENT="/etc/apt/sources.list.d/pve-enterprise.list"
   local CEPH_ENT="/etc/apt/sources.list.d/ceph.list"
   local NOSUB="/etc/apt/sources.list.d/pve-no-subscription.list"
-  # PVE 9 also ships .sources (deb822) variants for some repos:
-  local ENT_SOURCES="/etc/apt/sources.list.d/pve-enterprise.sources"
-  local CEPH_ENT_SOURCES="/etc/apt/sources.list.d/ceph.sources"
 
-  # PVE installers ship pve-enterprise.list with a header comment AND an active
-  # deb line — the right guard is "is there an UNCOMMENTED deb line?", not
-  # "does ANY comment exist?" (which always returns true and skips the disable).
   if [[ -f "$ENT" ]] && grep -Eq "^deb[[:space:]]" "$ENT"; then
     run "sed -i 's|^deb |# deb |' '$ENT'"
     log "  Disabled $ENT"
@@ -322,18 +390,11 @@ configure_repos() {
     run "sed -i 's|^deb \\(.*enterprise.*\\)|# deb \\1|' '$CEPH_ENT'"
     log "  Disabled enterprise line in $CEPH_ENT"
   fi
-  # New deb822 .sources files: flip Enabled: yes -> Enabled: no
-  for sf in "$ENT_SOURCES" "$CEPH_ENT_SOURCES"; do
-    if [[ -f "$sf" ]] && grep -Eq "^Enabled:[[:space:]]*yes" "$sf"; then
-      run "sed -i 's|^Enabled:.*yes|Enabled: no|' '$sf'"
-      log "  Disabled $sf"
-    fi
-  done
-
   if [[ ! -f "$NOSUB" ]]; then
     local CODENAME
-    CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-trixie}")"
+    CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-bookworm}")"
     run "echo 'deb http://download.proxmox.com/debian/pve $CODENAME pve-no-subscription' > '$NOSUB'"
+    log "  Added $NOSUB"
   fi
 }
 
