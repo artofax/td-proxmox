@@ -152,31 +152,139 @@ wait_for_port_inside_ct() {
 }
 
 # ----- Gitea -----------------------------------------------------------------
+
+# Detect which system user gitea runs as. Community-scripts builds tend to use
+# 'gitea'; older / source-builds sometimes use 'git'. Pick whichever exists.
+_gitea_runas_user() {
+  local ctid="$1" u
+  for u in gitea git gitea-web; do
+    pct exec "$ctid" -- id "$u" >/dev/null 2>&1 && { echo "$u"; return; }
+  done
+  echo gitea  # safe fallback
+}
+
+# Detect the on-disk app.ini path (community helper may use either of these).
+_gitea_config_path() {
+  local ctid="$1" p
+  for p in /etc/gitea/app.ini /var/lib/gitea/custom/conf/app.ini /opt/gitea/custom/conf/app.ini; do
+    pct exec "$ctid" -- test -f "$p" 2>/dev/null && { echo "$p"; return; }
+  done
+  echo /etc/gitea/app.ini  # the path the install POST will write to
+}
+
+# Is the first-run install wizard still up? Two signals:
+#   1. No app.ini on disk yet, OR
+#   2. /install endpoint reachable + returns the install page (200 with form)
+# Either means we need to POST /install before any CLI work.
+gitea_install_lock_on() {
+  local ctid="$1"
+  pct exec "$ctid" -- bash -lc '
+    for p in /etc/gitea/app.ini /var/lib/gitea/custom/conf/app.ini /opt/gitea/custom/conf/app.ini; do
+      [[ -f "$p" ]] && grep -qE "^INSTALL_LOCK\s*=\s*true" "$p" && exit 0
+    done
+    exit 1
+  ' >/dev/null 2>&1
+}
+
+# Run the first-run install by POSTing the form. Sets up SQLite3 and the
+# defaults the community helper omitted. After this, app.ini is on disk and
+# INSTALL_LOCK = true, so subsequent CLI commands work.
+gitea_first_run_setup() {
+  local ctid="$1"
+  local ip="$2"
+
+  if gitea_install_lock_on "$ctid"; then
+    log "  Gitea install lock already set — first-run setup skipped."
+    return
+  fi
+
+  log "  First-run wizard detected. POSTing /install (SQLite3, default paths)..."
+
+  # The form expects URL-encoded fields. We feed them through curl --data-urlencode
+  # so the server sees the same shape as the browser would. The fields below
+  # match what's visible in the install page screenshot — anything we leave out
+  # uses the server's default.
+  run "pct exec $ctid -- curl -fsS -X POST 'http://127.0.0.1:3000/' \
+       --data-urlencode 'db_type=sqlite3' \
+       --data-urlencode 'db_host=' \
+       --data-urlencode 'db_user=' \
+       --data-urlencode 'db_passwd=' \
+       --data-urlencode 'db_name=gitea' \
+       --data-urlencode 'ssl_mode=disable' \
+       --data-urlencode 'db_schema=' \
+       --data-urlencode 'charset=utf8' \
+       --data-urlencode 'db_path=/var/lib/gitea/data/gitea.db' \
+       --data-urlencode 'app_name=Gitea' \
+       --data-urlencode 'repo_root_path=/var/lib/gitea/data/gitea-repositories' \
+       --data-urlencode 'lfs_root_path=/var/lib/gitea/data/lfs' \
+       --data-urlencode 'run_user=gitea' \
+       --data-urlencode 'domain=${ip}' \
+       --data-urlencode 'ssh_port=22' \
+       --data-urlencode 'http_port=3000' \
+       --data-urlencode 'app_url=http://${ip}:3000/' \
+       --data-urlencode 'log_root_path=/var/lib/gitea/log' \
+       --data-urlencode 'smtp_addr=' --data-urlencode 'smtp_port=' \
+       --data-urlencode 'smtp_from=' --data-urlencode 'smtp_user=' \
+       --data-urlencode 'smtp_passwd=' \
+       --data-urlencode 'offline_mode=on' \
+       --data-urlencode 'default_allow_create_organization=on' \
+       --data-urlencode 'default_enable_timetracking=on' \
+       --data-urlencode 'no_reply_address=noreply.localhost' \
+       --data-urlencode 'password_algorithm=pbkdf2' \
+       -o /dev/null"
+
+  # Wait for app.ini to appear (Gitea writes it during the install POST, then
+  # restarts itself; can take a few seconds).
+  local i=0
+  while ! gitea_install_lock_on "$ctid"; do
+    (( ++i > 20 )) && die "  Gitea didn't finalize install after 40s. Check pct exec $ctid -- journalctl -u gitea --no-pager | tail -20"
+    sleep 2
+  done
+  log "  Install complete. app.ini written, INSTALL_LOCK = true."
+
+  # Wait again for the daemon to come back on port 3000 after the post-install restart.
+  wait_for_port_inside_ct "$ctid" 3000 "Gitea (post-install restart)"
+}
+
 configure_gitea() {
   ct_up "$GITEA_CTID"
   log "Configuring Gitea (CT $GITEA_CTID)..."
 
   wait_for_port_inside_ct "$GITEA_CTID" 3000 "Gitea"
 
+  # Pick up the CT's IP early so the first-run setup can use it.
+  GITEA_IP="$(pct exec "$GITEA_CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || echo "10.0.0.0")"
+
+  # Finalize the install wizard if it's still up (community helper sometimes
+  # ships Gitea with the binary running but no app.ini, leaving the SQLite3
+  # / MySQL / Postgres picker on screen). Always safe to call — exits early
+  # if install is already locked.
+  gitea_first_run_setup "$GITEA_CTID" "$GITEA_IP"
+
+  local GITEA_USER GITEA_CONFIG
+  GITEA_USER="$(_gitea_runas_user "$GITEA_CTID")"
+  GITEA_CONFIG="$(_gitea_config_path "$GITEA_CTID")"
+  log "  Detected Gitea run-as user: $GITEA_USER (config: $GITEA_CONFIG)"
+
   # Create admin user (idempotent — Gitea errors if user exists; we ignore that case)
   log "  Creating admin user: $ADMIN_USER"
-  run "pct exec $GITEA_CTID -- bash -lc \"sudo -u git gitea admin user create \
+  run "pct exec $GITEA_CTID -- bash -lc \"sudo -u $GITEA_USER gitea admin user create \
         --username '$ADMIN_USER' \
         --password '$ADMIN_PASSWORD' \
         --email    '$ADMIN_EMAIL' \
         --admin \
         --must-change-password=false \
-        --config /etc/gitea/app.ini || echo '  (user may already exist)'\""
+        --config $GITEA_CONFIG || echo '  (user may already exist)'\""
 
   # Mint an access token with full scope
   log "  Minting access token (name: pi-agent)..."
   GITEA_TOKEN=""
   if (( ! DRY_RUN )); then
-    GITEA_TOKEN="$(pct exec "$GITEA_CTID" -- bash -lc "sudo -u git gitea admin user generate-access-token \
+    GITEA_TOKEN="$(pct exec "$GITEA_CTID" -- bash -lc "sudo -u $GITEA_USER gitea admin user generate-access-token \
         --username '$ADMIN_USER' \
         --token-name 'pi-agent' \
         --scopes 'all' \
-        --config /etc/gitea/app.ini 2>/dev/null | awk -F': ' '/^Access token/{print \$2}'" || true)"
+        --config $GITEA_CONFIG 2>/dev/null | awk -F': ' '/^Access token/{print \$2}'" || true)"
     if [[ -z "$GITEA_TOKEN" ]]; then
       warn "  Token generation returned empty — token may already exist with this name. Re-run with a fresh --token-name or revoke in Gitea UI."
     fi
@@ -184,8 +292,6 @@ configure_gitea() {
     GITEA_TOKEN="DRYRUN_GITEA_TOKEN_PLACEHOLDER"
   fi
 
-  # Pick up the CT's IP for downstream use
-  GITEA_IP="$(pct exec "$GITEA_CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || echo "10.0.0.0")"
   log "  Gitea reachable at: http://$GITEA_IP:3000"
 }
 
