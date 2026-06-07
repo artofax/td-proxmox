@@ -86,6 +86,30 @@ install_ollama_in_ct() {
   run "pct exec $ctid -- bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y curl zstd && curl -fsSL https://ollama.com/install.sh | sh'"
 }
 
+# Drop a systemd override so the Ollama daemon binds 0.0.0.0:11434 instead of
+# the default 127.0.0.1:11434. This lets other tailnet devices and other LXCs
+# (e.g. OpenWebUI) hit http://<hostname>:11434/ as an API endpoint. The CLI
+# inside the same CT still resolves to localhost:11434 (which 0.0.0.0 includes),
+# so 'ollama list', 'ollama run', etc. keep working unchanged inside pct enter.
+#
+# Idempotent — the file content is the same on every run; checking presence
+# would race with content drift, so we just overwrite + reload + restart.
+configure_ollama_network_in_ct() {
+  local ctid="$1"
+  log "  [$ctid] Binding Ollama to 0.0.0.0:11434 (systemd override)..."
+  run "pct exec $ctid -- bash -lc '
+    mkdir -p /etc/systemd/system/ollama.service.d
+    cat > /etc/systemd/system/ollama.service.d/network.conf <<DROPIN
+[Service]
+Environment=\"OLLAMA_HOST=0.0.0.0:11434\"
+DROPIN
+    systemctl daemon-reload
+    systemctl restart ollama
+  '"
+  # Brief settle so subsequent ollama signin / pull don't race the restart.
+  run "sleep 2"
+}
+
 ollama_signin_in_ct() {
   local ctid="$1" hostname="$2"
   if (( SKIP_SIGNIN )); then
@@ -201,6 +225,14 @@ for entry in "${TARGETS[@]}"; do
   log "============================================================"
 
   install_ollama_in_ct "$ctid"
+
+  # On the "primary" Ollama host (with-pi), expose the daemon on 0.0.0.0:11434
+  # so it's reachable from OpenWebUI, pi running on the host, or any other
+  # tailnet client. "no-pi" CTs keep Ollama localhost-bound (internal use only).
+  if [[ "$mode" == "with-pi" ]]; then
+    configure_ollama_network_in_ct "$ctid"
+  fi
+
   ollama_signin_in_ct  "$ctid" "$hostname"
   pull_model_in_ct     "$ctid"
 
