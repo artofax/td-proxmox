@@ -12,10 +12,11 @@ Run sheet and scripts live in **[`automation/`](automation/)**:
 From `/root` on a fresh PVE install:
 
 ```bash
-./bootstrap-pve.sh              # ~18 min — prompts for SSH key, Tailscale auth key, CT password
-./setup-ollama-pi.sh            # ~5 min — Ollama + pi install, two browser clicks for device pairing
-./configure-apps.sh             # ~3 min — prompts for admin user/email/password + OpenRouter key
-# (Gitea + OpenWebUI + Homepage all configured)
+./bootstrap-pve.sh              # ~18 min — prompts for SSH key, Tailscale auth key, CT password.
+                                #          Click "Default Install" in each helper-script's whiptail menu (4 clicks total).
+./setup-ollama-pi.sh            # ~5 min  — Ollama + pi install. Two browser clicks for ollama.com device pairing.
+./configure-apps.sh             # ~3 min  — prompts for admin user/email/password + OpenRouter key.
+                                #          Gitea + OpenWebUI + Homepage all configured automatically.
 ```
 
-Hands-on time: roughly 10 minutes of the ~45-minute total.
+Hands-on time: roughly 10 minutes of the ~45-minute total — 4 menu clicks during bootstrap, 2 browser clicks during setup-ollama-pi, plus the prompts in each phase.

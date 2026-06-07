@@ -76,17 +76,21 @@ This solves the chicken-and-egg on a fresh install: you don't need to scp the pu
 
 Drop `--dry-run` once the printed command sequence looks right. The script:
 
-1. Disables the enterprise repo, enables `pve-no-subscription`.
-2. Runs `apt update && apt upgrade -y`.
-3. Drops your workstation pubkey into `/root/.ssh/authorized_keys`.
-4. Runs `pveam update` + `pveam download local debian-12-standard...`.
-5. Creates `ollama-pi-agent` (CT 200) with `pct create`, plus the TUN passthrough config.
-6. Runs the community helper scripts for `docker` (CT 215, with Docker preinstalled), `gitea` (CT 202), `openwebui` (CT 100), and `homepage` (CT 110).
-7. Applies the Tailscale add-on to each CT and runs `tailscale up --authkey=...` non-interactively.
+1. Disables the enterprise repo, enables `pve-no-subscription` (handles both PVE 8 `.list` and PVE 9 `.sources` formats).
+2. Runs `apt update && apt upgrade -y` and resolves the latest Debian 12 template via `pveam available`.
+3. Appends your workstation pubkey to `/root/.ssh/authorized_keys` on the PVE host.
+4. Creates `ollama-pi-agent` with `pct create` (CT 200 if free), plus the TUN passthrough config.
+5. Runs the community helper scripts for `docker`, `gitea`, `openwebui`, and `homepage`.
+6. Pushes the PVE host's authorized_keys into each CT (workstation key + any other keys you've added).
+7. Installs Tailscale directly inside each CT (no addon script, no whiptail) and runs `tailscale up --authkey=...` so each CT joins your tailnet.
 
-End state: five containers running, all reachable by MagicDNS name (`ollama-pi-agent`, `docker`, `gitea`, `openwebui`, `homepage`) from any device on your tailnet.
+> **Heads up about whiptail menus during step 5.** Each community helper presents a menu at the start with **Default Install** / **Advanced Install** / **App Defaults** / **Settings** options. **Pick "Default Install"** for each one — that's what the script's `var_*` env vars (CPU/RAM/disk/GPU/SSH key) are tuned for. Four menus, one click each.
 
-Idempotent. Safe to re-run — existing CTs are skipped.
+> **About CTIDs.** Community helper scripts auto-assign the next available CTID rather than honoring our preferred IDs, so your `pct list` may show different numbers than the comments in the script (e.g., docker landing at CT 100 instead of 215). The scripts work entirely by hostname after creation, so this is cosmetic — `tailscale status` and `ssh root@docker` still work the same.
+
+End state: five containers running, all reachable by MagicDNS hostname (`ollama-pi-agent`, `docker`, `gitea`, `openwebui`, `homepage`) from any device on your tailnet, and from each other via the SSH trust mesh that `setup-ollama-pi.sh` builds in the next phase.
+
+Idempotent. Safe to re-run — existing CTs and steps already completed are detected by hostname and skipped.
 
 ---
 
