@@ -15,6 +15,10 @@ Optional extras live in **[`addons/`](addons/)** — each script is self-contain
 - **`setup-pi-web-uis.sh`** — installs three browser UIs on `ollama-pi-agent`: a cards UI (tool calls/thinking blocks, multi-tab session) on 9090, a `ttyd`-wrapped pi terminal on 9091, and a plain `bash` shell on 9092.
 - **`setup-port80-redirect.sh`** — adds a kernel-level NAT redirect on `gitea`, `openwebui`, and `homepage` so you can type `http://gitea` instead of `http://gitea:3000`. Apps unchanged; both URLs work.
 
+One-shot utilities live in **[`tools/`](tools/)** — scripts that use the running homelab to do work (rather than installing more services):
+
+- **`push-to-gitea.sh`** — bulk-import every subfolder of a directory as its own Gitea repo. Drop a folder of community projects into filebrowser, run the script, every project ends up at `http://gitea/<owner>/<project>`.
+
 From `/root` on a fresh PVE install:
 
 ```bash
