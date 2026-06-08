@@ -202,6 +202,14 @@ install_cards_ui() {
   log "  Installing systemd unit pi-cards.service..."
   local NODE_BIN_FOR_UNIT="$PI_NODE_BIN/node"
   [[ -z "$PI_NODE_BIN" ]] && NODE_BIN_FOR_UNIT="/usr/bin/node"
+  # PATH must include the pi-node bin directory so that pi-coding-agent's
+  # internal DefaultPackageManager can find `npm` when it calls
+  # `npm root -g`. Without this it crashes with:
+  #   Fatal: Error: Failed to run npm root -g: undefined
+  # right after "Initialising AgentSession…".
+  local PI_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  [[ -n "$PI_NODE_BIN" ]] && PI_PATH="$PI_NODE_BIN:$PI_PATH"
+
   run "pct exec $TARGET_CTID -- bash -c 'cat > /etc/systemd/system/pi-cards.service <<UNIT
 [Unit]
 Description=pi-remote-web-ui (cards UI for pi)
@@ -215,6 +223,7 @@ ExecStart=$NODE_BIN_FOR_UNIT dist-server/index.js
 Environment=NODE_ENV=production
 Environment=HOME=/root
 Environment=USER=root
+Environment=PATH=$PI_PATH
 Restart=on-failure
 RestartSec=5
 
