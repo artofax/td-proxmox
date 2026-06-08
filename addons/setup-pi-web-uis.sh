@@ -268,8 +268,12 @@ WorkingDirectory=/root
 # -p : port to bind
 # -c : basic auth user:pass
 # -t titleFixed : set the browser tab title
-# bash -lc to make sure /usr/local/bin (Ollama, pi) is on PATH
-ExecStart=/usr/local/bin/ttyd -W -p $TERM_PORT -c $ADMIN_USER:$ADMIN_PASSWORD -t titleFixed=\"pi terminal\" bash -lc \"ollama launch pi\"
+#
+# We export HOME and USER inline in the bash command rather than relying
+# solely on systemds Environment= directive. In practice that directive
+# does not always propagate through ttyds pty fork to the child shell,
+# which causes Ollama to panic with: panic: HOME is not defined
+ExecStart=/usr/local/bin/ttyd -W -p $TERM_PORT -c $ADMIN_USER:$ADMIN_PASSWORD -t titleFixed=\"pi terminal\" bash -lc \"export HOME=/root USER=root; cd /root; ollama launch pi\"
 Restart=on-failure
 RestartSec=5
 
