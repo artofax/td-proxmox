@@ -371,12 +371,23 @@ add_homepage_tile() {
     return
   fi
 
+  # If the marker exists, surgically remove the existing block so re-runs
+  # can update content (e.g. you added a third tile and want it to show up).
+  # awk strategy: when we hit our marker line, skip it and following lines
+  # until we see another '# TD-Addon:' line (then resume printing). If our
+  # block runs to EOF, awk just stops cleanly. Other addons' blocks are
+  # untouched. Then we append the new block fresh at the end.
   if pct exec "$homepage_ctid" -- grep -qF "$marker" "$services_file" 2>/dev/null; then
-    log "  Homepage tile for $addon_name already in $services_file."
-    return
+    log "  Updating existing Homepage tile for $addon_name in $services_file..."
+    run "pct exec $homepage_ctid -- bash -lc \"awk -v m='$marker' '
+      \\\$0 ~ m { in_block=1; next }
+      in_block && \\\$0 ~ /^# TD-Addon:/ { in_block=0 }
+      !in_block { print }
+    ' '$services_file' > /tmp/services.yaml.new && mv /tmp/services.yaml.new '$services_file'\""
+  else
+    log "  Appending Homepage tile for $addon_name to $services_file..."
   fi
 
-  log "  Appending Homepage tile for $addon_name to $services_file..."
   printf '\n%s\n%s\n' "$marker" "$tile_block" | pct exec "$homepage_ctid" -- tee -a "$services_file" > /dev/null
 
   # Try the common service names. Homepage's hot-reload picks up YAML changes
