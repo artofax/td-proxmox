@@ -16,7 +16,7 @@
 #   --sshkey-text <key>    Or paste the whole 'ssh-... AAAA... user@host' string.
 #   --tsauthkey   <key>    Tailscale auth key (tskey-auth-...).
 #                          Generate at https://login.tailscale.com/admin/settings/keys.
-#   --ct-password <pw>     Root password for ollama-pi-agent + docker (TS auth-key
+#   --ct-password <pw>     Root password for ollama-pi-agent + sandbox (TS auth-key
 #                          login means you rarely need this, but pct create needs one).
 #
 # When --sshkey-file/--sshkey-text is missing the script prompts you to paste
@@ -31,7 +31,7 @@
 #
 # CTs created (DHCP, IPv6 SLAAC, bridge vmbr0):
 #   200  ollama-pi-agent  pct create — Debian 12 + manual Ollama/pi (Phase 4)
-#   215  docker           via community-scripts.org/ct/docker.sh (Docker preinstalled)
+#   215  sandbox          via community-scripts.org/ct/docker.sh (Docker preinstalled)
 #   202  gitea            via community-scripts.org/ct/gitea.sh
 #   100  openwebui        via community-scripts.org/ct/openwebui.sh
 #   110  homepage         via community-scripts.org/ct/homepage.sh (dashboard)
@@ -75,11 +75,12 @@ TMP_SSHKEY_FILE=""   # populated if we have to materialise a pasted key
 
 # CTID -> hostname / role
 # Hostnames must be DNS-safe (alphanumeric + hyphens, no spaces) — that's a
-# constraint of LXC/Linux, not of this script. So "Ollama Pi Agent" becomes
-# ollama-pi-agent and "Docker" stays docker.
+# constraint of LXC/Linux, not of this script. The CT that runs Docker is
+# named 'sandbox' rather than 'docker' to avoid the prompt-naming clash
+# ("run a docker on docker"); the community helper script is still ct/docker.sh.
 declare -A CT_HOSTNAME=(
   [200]="ollama-pi-agent"
-  [215]="docker"
+  [215]="sandbox"
   [202]="gitea"
   [100]="openwebui"
   [110]="homepage"
@@ -89,7 +90,7 @@ declare -A CT_HOSTNAME=(
 PCT_CREATE_CTS=(200)
 # CTs we delegate to community-scripts helper scripts
 HELPER_SCRIPTS=(
-  "215|docker|https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/docker.sh"
+  "215|sandbox|https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/docker.sh"
   "202|gitea|https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/gitea.sh"
   "100|openwebui|https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/openwebui.sh"
   "110|homepage|https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/homepage.sh"
@@ -208,7 +209,7 @@ preflight_state() {
     # Look up by HOSTNAME first — the static CTID map drifts as helper scripts
     # auto-assign IDs. The previous version trusted the static CTID and could
     # confuse one CT's state for another's (e.g., 'is openwebui on tailnet?'
-    # answered against CT 100 which is actually docker).
+    # answered against CT 100 which is actually sandbox).
     actual="$(find_ct_by_hostname "$key" 2>/dev/null || true)"
     if [[ -z "$actual" ]] && ct_exists "$c"; then
       actual="$c"
@@ -577,7 +578,7 @@ run_helper_script() {
   #
   # IMPORTANT: we do NOT pass var_cpu / var_ram / var_disk. Each helper has
   # its own well-tuned defaults for its actual install footprint:
-  #   docker:    2 cpu / 2 GB RAM / 4 GB disk
+  #   sandbox (docker.sh): 2 cpu / 2 GB RAM / 4 GB disk
   #   gitea:     1 cpu / 1 GB RAM / 8 GB disk
   #   openwebui: 4 cpu / 8 GB RAM / 50 GB disk  ← needs the headroom
   #   homepage:  1 cpu / 1 GB RAM / 4 GB disk
@@ -622,9 +623,9 @@ run_helper_script() {
 #
 # Why this exists: pct create --ssh-public-keys honors the file natively, so
 # pct-created CTs (ollama-pi-agent) get the key automatically. But the
-# community helper scripts (docker, gitea, openwebui, homepage) don't reliably
-# honor the SSH_AUTHORIZED_KEY env var in Default Install mode — they were
-# leaving CTs with no workstation key, so `ssh root@docker` from the laptop
+# community helper scripts (sandbox via docker.sh, gitea, openwebui, homepage)
+# don't reliably honor the SSH_AUTHORIZED_KEY env var in Default Install mode —
+# they were leaving CTs with no workstation key, so `ssh root@sandbox` from the laptop
 # would prompt for a password.
 #
 # This function reads the PVE host's authorized_keys, filters to lines that
@@ -775,7 +776,7 @@ or pass it via flag: /root/bootstrap-pve.sh --tsauthkey tskey-auth-..."
 
 # ----- driver ----------------------------------------------------------------
 main() {
-  log "==> Bootstrap PVE: 5-CT homelab (ollama-pi-agent, docker, gitea, openwebui, homepage)"
+  log "==> Bootstrap PVE: 5-CT homelab (ollama-pi-agent, sandbox, gitea, openwebui, homepage)"
 
   configure_repos
   apt_refresh

@@ -563,7 +563,7 @@ configure_homepage() {
 
 - Sandbox:
     - Docker:
-        description: Docker host for ad-hoc deployments (ssh root@docker)
+        description: Docker host for ad-hoc deployments (ssh root@sandbox)
         icon: docker.png
 YAML'"
 

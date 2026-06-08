@@ -5,7 +5,7 @@
 # Default behavior (no flags): walks the built-in target list, currently
 #   ollama-pi-agent   → install/verify Ollama, signin, pull model, install pi,
 #                       generate /root/.ssh/id_ed25519, push pubkey into
-#                       docker/gitea/openwebui/homepage so pi can ssh into
+#                       sandbox/gitea/openwebui/homepage so pi can ssh into
 #                       any of them passwordless
 #   openwebui         → install/verify Ollama, signin, pull model (no pi)
 # Idempotent at every step — re-runs only do work that isn't already done.
@@ -45,7 +45,7 @@ DEFAULT_TARGETS=(
 # password. The script generates a keypair on the pi host, drops the pubkey
 # into each target's /root/.ssh/authorized_keys, and pre-trusts each target's
 # host key so the first connection doesn't prompt.
-SSH_TRUST_TARGETS=(docker gitea openwebui homepage)
+SSH_TRUST_TARGETS=(sandbox gitea openwebui homepage)
 
 # ----- parse args ------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -206,7 +206,7 @@ pull_model_in_ct() {
 }
 
 # Set up SSH trust from the pi host into the other service CTs, so pi can
-# `ssh root@docker` etc. without password or fingerprint prompts.
+# `ssh root@sandbox` etc. without password or fingerprint prompts.
 #
 # Three things happen for each target:
 #   1. Generate /root/.ssh/id_ed25519 on the pi host (idempotent — keep

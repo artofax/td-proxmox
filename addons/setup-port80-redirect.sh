@@ -18,7 +18,7 @@
 #   homepage  :80 → :3000
 #
 # Not redirected:
-#   docker         (no single web service on this CT)
+#   sandbox        (no single web service on this CT)
 #   ollama-pi-agent (multi-service: filebrowser:8080, pi-web-uis:9090-9092
 #                    — each needs its own port; binding 80 to one would
 #                    mask the rest)

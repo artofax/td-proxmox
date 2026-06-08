@@ -1,6 +1,6 @@
 # TD-Proxmox — Automated Build Run Sheet
 
-End state after a full run: a Proxmox VE 9.x host with five LXC containers (`ollama-pi-agent`, `docker`, `gitea`, `openwebui`, `homepage`), all joined to your Tailscale tailnet, Gitea + OpenWebUI configured with admin accounts and an OpenRouter connection, Homepage running with a default dashboard ready for pi to populate, and pi itself running on `ollama-pi-agent`.
+End state after a full run: a Proxmox VE 9.x host with five LXC containers (`ollama-pi-agent`, `sandbox`, `gitea`, `openwebui`, `homepage`), all joined to your Tailscale tailnet, Gitea + OpenWebUI configured with admin accounts and an OpenRouter connection, Homepage running with a default dashboard ready for pi to populate, and pi itself running on `ollama-pi-agent`. The `sandbox` CT is a Docker host (built via the community `docker.sh` helper) — it's named `sandbox` rather than `docker` so prompts like "run a docker image on sandbox" stay unambiguous.
 
 Total time from "USB plugged in" to "Homepage dashboard up": ~45 minutes, of which roughly 10 minutes is your hands on the keyboard.
 
@@ -25,7 +25,7 @@ Phases 1 and 2 are the only fully-manual stops. Phase 4 has one browser click fo
 
 Have ready:
 
-- A computer with at least **120 GB of free disk** after the Proxmox install — the LXCs allocate roughly: ollama-pi-agent 20 GB + docker 4 GB + gitea 8 GB + openwebui 50 GB + homepage 4 GB (≈ 86 GB), plus the template cache (~600 MB) and headroom for models / Docker images. 256 GB SSD is comfortable; 128 GB will work but get tight.
+- A computer with at least **120 GB of free disk** after the Proxmox install — the LXCs allocate roughly: ollama-pi-agent 20 GB + sandbox 4 GB + gitea 8 GB + openwebui 50 GB + homepage 4 GB (≈ 86 GB), plus the template cache (~600 MB) and headroom for models / Docker images. 256 GB SSD is comfortable; 128 GB will work but get tight.
 - A USB drive (8 GB+) with the Proxmox VE 9.1 ISO flashed via Balena Etcher.
 - An SSH keypair on your workstation. `ssh-keygen -t ed25519` if you don't have one.
 - An account at **tailscale.com** with an auth key minted in advance: admin console → Settings → Keys → Generate auth key → reusable, no expiry needed for first run.
@@ -81,15 +81,15 @@ Drop `--dry-run` once the printed command sequence looks right. The script:
 2. Runs `apt update && apt upgrade -y` and resolves the latest Debian 12 template via `pveam available`.
 3. Appends your workstation pubkey to `/root/.ssh/authorized_keys` on the PVE host.
 4. Creates `ollama-pi-agent` with `pct create` (CT 200 if free), plus the TUN passthrough config.
-5. Runs the community helper scripts for `docker`, `gitea`, `openwebui`, and `homepage`.
+5. Runs the community helper scripts for `sandbox` (via `docker.sh`), `gitea`, `openwebui`, and `homepage`.
 6. Pushes the PVE host's authorized_keys into each CT (workstation key + any other keys you've added).
 7. Installs Tailscale directly inside each CT (no addon script, no whiptail) and runs `tailscale up --authkey=...` so each CT joins your tailnet.
 
 > **Heads up about whiptail menus during step 5.** Each community helper presents a menu at the start with **Default Install** / **Advanced Install** / **App Defaults** / **Settings** options. **Pick "Default Install"** for each one — that's what the script's `var_*` env vars (CPU/RAM/disk/GPU/SSH key) are tuned for. Four menus, one click each.
 
-> **About CTIDs.** Community helper scripts auto-assign the next available CTID rather than honoring our preferred IDs, so your `pct list` may show different numbers than the comments in the script (e.g., docker landing at CT 100 instead of 215). The scripts work entirely by hostname after creation, so this is cosmetic — `tailscale status` and `ssh root@docker` still work the same.
+> **About CTIDs.** Community helper scripts auto-assign the next available CTID rather than honoring our preferred IDs, so your `pct list` may show different numbers than the comments in the script (e.g., sandbox landing at CT 100 instead of 215). The scripts work entirely by hostname after creation, so this is cosmetic — `tailscale status` and `ssh root@sandbox` still work the same.
 
-End state: five containers running, all reachable by MagicDNS hostname (`ollama-pi-agent`, `docker`, `gitea`, `openwebui`, `homepage`) from any device on your tailnet, and from each other via the SSH trust mesh that `setup-ollama-pi.sh` builds in the next phase.
+End state: five containers running, all reachable by MagicDNS hostname (`ollama-pi-agent`, `sandbox`, `gitea`, `openwebui`, `homepage`) from any device on your tailnet, and from each other via the SSH trust mesh that `setup-ollama-pi.sh` builds in the next phase.
 
 Idempotent. Safe to re-run — existing CTs and steps already completed are detected by hostname and skipped.
 
@@ -112,7 +112,7 @@ The script walks both `ollama-pi-agent` and `openwebui` automatically (resolved 
 2. Drops `/etc/profile.d/usrlocal-path.sh` and appends to `/etc/bash.bashrc` so future `pct enter` sessions see `/usr/local/bin` (Ollama's install location) on PATH.
 3. Runs `ollama signin` — Ollama prints a URL like `https://ollama.com/connect?name=<hostname>&key=...` to your terminal. **Visit it in a browser logged into ollama.com, click Connect, and the script resumes.** Two browser clicks per fresh host — once for each CT.
 4. Pulls the default model (`gemma3:12b-cloud`, override with `--model …`).
-5. On `ollama-pi-agent` only: binds Ollama to `0.0.0.0:11434` (so other tailnet devices can hit the API), installs pi from `pi.dev/install.sh`, appends Node.js bin to `PATH`, generates `/root/.ssh/id_ed25519` and pushes the pubkey into `docker`, `gitea`, `openwebui`, and `homepage`'s `authorized_keys` — so pi can `ssh root@docker` (etc.) without passwords or fingerprint prompts.
+5. On `ollama-pi-agent` only: binds Ollama to `0.0.0.0:11434` (so other tailnet devices can hit the API), installs pi from `pi.dev/install.sh`, appends Node.js bin to `PATH`, generates `/root/.ssh/id_ed25519` and pushes the pubkey into `sandbox`, `gitea`, `openwebui`, and `homepage`'s `authorized_keys` — so pi can `ssh root@sandbox` (etc.) without passwords or fingerprint prompts.
 
 Idempotent at every step — re-runs detect what's already installed (Ollama binary, model pulled, pi installed, PATH already set) and skip cleanly. So if anything fails partway, just re-run.
 
@@ -151,7 +151,7 @@ Drop `--dry-run` to commit. The script:
 1. Creates the Gitea admin user via `gitea admin user create`, mints an access token named `pi-agent`.
 2. Creates the OpenWebUI admin user via `/api/v1/auths/signup`, logs in, and adds an OpenRouter connection (`https://openrouter.ai/api/v1`) under OpenAI-compatible providers.
 3. On ollama-pi-agent, writes `/root/.netrc` with the Gitea creds and persists `OPENROUTER_API_KEY` in `/root/.bashrc`.
-4. On homepage, writes a starter `services.yaml` (Gitea + widget, OpenWebUI, ollama-pi-agent, docker), `settings.yaml` (theme, title, layout), `bookmarks.yaml` (Proxmox + Tailscale + OpenRouter + Ollama admin links), and `widgets.yaml` (resources + search bar), then restarts the service.
+4. On homepage, writes a starter `services.yaml` (Gitea + widget, OpenWebUI, ollama-pi-agent, sandbox), `settings.yaml` (theme, title, layout), `bookmarks.yaml` (Proxmox + Tailscale + OpenRouter + Ollama admin links), and `widgets.yaml` (resources + search bar), then restarts the service.
 
 A credentials summary is written to `/root/td-tokens.txt` (chmod 600) and echoed to stdout. Open `http://homepage:3000` from any tailnet device — every tile already points at the right place.
 
@@ -164,15 +164,15 @@ A credentials summary is written to `/root/td-tokens.txt` (chmod 600) and echoed
 - Gitea: `.netrc` already on disk, push/pull "just works" on `http://gitea:3000/td/<repo>.git`.
 - OpenRouter: `OPENROUTER_API_KEY` already in environment — ask pi to add it as a model provider on first launch.
 
-Sample prompts that mirror the deck demo (Docker is already installed on the `docker` CT, so pi can go straight to using it):
+Sample prompts that mirror the deck demo (Docker is already installed on the `sandbox` CT, so pi can go straight to using it):
 
-> "ssh into the docker container and run `docker run hello-world`. Show me the output."
+> "ssh into the sandbox container and run `docker run hello-world`. Show me the output."
 >
-> "ssh into the docker container and tell me what's listening on which port."
+> "ssh into the sandbox container and tell me what's listening on which port."
 >
 > "write a small Python CLI that prints a random programming joke. Init a git repo, push to Gitea as `td/joke-cli`."
 >
-> "ssh into the docker container, clone td/joke-cli, build it as a container image, and run it."
+> "ssh into the sandbox container, clone td/joke-cli, build it as a container image, and run it."
 >
 > "ssh into the homepage container, open services.yaml, and add a tile for the joke-cli repo under Development. Restart the service. The other tiles are already there from configure-apps.sh — just slot the new one in."
 

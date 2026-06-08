@@ -1,6 +1,6 @@
 # Addons
 
-Optional scripts that layer on top of the core homelab built by [`automation/`](../automation/). Each addon is self-contained and assumes the base stack already exists — the CTs (`ollama-pi-agent`, `docker`, `gitea`, `openwebui`, `homepage`) are running and joined to Tailscale.
+Optional scripts that layer on top of the core homelab built by [`automation/`](../automation/). Each addon is self-contained and assumes the base stack already exists — the CTs (`ollama-pi-agent`, `sandbox`, `gitea`, `openwebui`, `homepage`) are running and joined to Tailscale.
 
 If you haven't run the automation scripts yet, start there: [automation/README-automation.md](../automation/README-automation.md).
 
@@ -173,7 +173,7 @@ That tells the kernel: rewrite the destination port of any incoming TCP packet b
 | `openwebui` | 80 → 8080 |
 | `homepage` | 80 → 3000 |
 
-`docker` and `ollama-pi-agent` aren't included because they don't have a single obvious "primary" web service — `ollama-pi-agent` runs filebrowser on 8080, pi UIs on 9090–9092, and pinning one to port 80 would mask the others.
+`sandbox` and `ollama-pi-agent` aren't included because they don't have a single obvious "primary" web service — `ollama-pi-agent` runs filebrowser on 8080, pi UIs on 9090–9092, and pinning one to port 80 would mask the others.
 
 **Install:**
 
