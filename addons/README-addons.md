@@ -10,7 +10,7 @@ If you haven't run the automation scripts yet, start there: [automation/README-a
 
 | Script | What it does | Target CT | Time |
 |---|---|---|---|
-| [`setup-filebrowser.sh`](setup-filebrowser.sh) | Drag-and-drop web UI for getting files into `ollama-pi-agent` where pi can read them | `ollama-pi-agent` | ~3 min |
+| [`setup-filebrowser.sh`](setup-filebrowser.sh) | Drag-and-drop web UI for getting files into `ollama-pi-agent` (pi reads them) and `sandbox` (Dockerfiles, compose files, project source) | `ollama-pi-agent`, `sandbox` | ~3 min |
 | [`setup-pi-web-uis.sh`](setup-pi-web-uis.sh) | Three browser UIs on `ollama-pi-agent`: cards (9090), pi terminal (9091), plain bash shell (9092) | `ollama-pi-agent` | ~5 min |
 | [`setup-port80-redirect.sh`](setup-port80-redirect.sh) | Kernel-level NAT redirect so `http://gitea`, `http://openwebui`, `http://homepage` work without typing `:3000` / `:8080` | `gitea`, `openwebui`, `homepage` | ~1 min |
 
@@ -18,37 +18,44 @@ If you haven't run the automation scripts yet, start there: [automation/README-a
 
 ## `setup-filebrowser.sh`
 
-Installs [filebrowser](https://github.com/filebrowser/filebrowser) on `ollama-pi-agent` and exposes `/root/uploads/` as a drag-and-drop web UI at `http://ollama-pi-agent:8080`. Drop a PDF or markdown file in the browser tab, immediately reference it in a pi prompt like `"summarize the PDF in /root/uploads/"` — no scp, no rsync, no sftp client.
+Installs [filebrowser](https://github.com/filebrowser/filebrowser) on **both `ollama-pi-agent` and `sandbox`** by default and exposes `/root/uploads/` as a drag-and-drop web UI on each (`http://ollama-pi-agent:8080`, `http://sandbox:8080`). Drop a PDF or markdown file into the pi host's UI, immediately reference it in a pi prompt like `"summarize the PDF in /root/uploads/"` — no scp, no rsync, no sftp client. Drop a Dockerfile or compose file into the sandbox UI, then `ssh root@sandbox` and `cd uploads` to use it.
 
 **What you get:**
 
-- Single 20 MB Go binary running as a systemd service inside CT 200
+- Single 20 MB Go binary running as a systemd service inside each target CT
 - Web UI: drag-drop upload, folder navigation, in-browser text edit, file preview
-- JSON-file auth with one admin user, JWT sessions
-- Files land at `/root/uploads/` on `ollama-pi-agent` — already visible to pi without any additional setup
-- Optional Homepage tile (script prints the YAML snippet to paste)
+- JSON-file auth with one admin user (same credentials across both instances), JWT sessions
+- Files land at `/root/uploads/` on each target — pi reads from the `ollama-pi-agent` instance; Docker / `ssh root@sandbox` workflows use the `sandbox` instance
+- Auto-registers a Homepage tile per instance (separately updateable via per-target `# TD-Addon:` marker)
 
 **Prereqs:**
 
-- `ollama-pi-agent` CT exists and is running (from `bootstrap-pve.sh`)
-- Tailscale is up on the CT (so `http://ollama-pi-agent:8080` resolves via MagicDNS)
-- You have admin creds you want to use for the filebrowser login
+- `ollama-pi-agent` and `sandbox` CTs exist and are running (from `bootstrap-pve.sh`)
+- Tailscale is up on each CT (so `http://ollama-pi-agent:8080` and `http://sandbox:8080` resolve via MagicDNS)
+- You have admin creds you want to use for the filebrowser login (shared across both instances)
 
 **Install:**
 
 ```bash
-# On the PVE host
+# On the PVE host — installs on both ollama-pi-agent and sandbox
 curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/addons/setup-filebrowser.sh \
   -o /root/setup-filebrowser.sh
 chmod +x /root/setup-filebrowser.sh
 /root/setup-filebrowser.sh
 ```
 
-The script prompts for:
+To install on only one of them:
+
+```bash
+/root/setup-filebrowser.sh --target ollama-pi-agent      # pi host only
+/root/setup-filebrowser.sh --target sandbox              # docker host only
+```
+
+The script prompts once for:
 1. Admin username (e.g. `td`)
 2. Admin password (hidden, confirmed twice, min 8 chars)
 
-…then installs the binary, initializes `/etc/filebrowser/filebrowser.db`, creates the admin user, drops a systemd unit, and starts the service. End state: `http://ollama-pi-agent:8080` is live.
+…then iterates over each target, installs the binary, initializes `/etc/filebrowser/filebrowser.db`, creates the admin user, drops a systemd unit, and starts the service.
 
 **Or from your own Gitea (after first push):**
 
@@ -61,30 +68,22 @@ curl -fsSL http://gitea:3000/<your-gitea-user>/td-proxmox/raw/branch/main/addons
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--ct-id N` | (hostname lookup) | Target a CT by ID instead of looking up `ollama-pi-agent` |
-| `--hostname X` | `ollama-pi-agent` | Look up a CT by a different hostname |
-| `--root <path>` | `/root/uploads` | Filesystem path the UI exposes |
-| `--port <n>` | `8080` | Port filebrowser listens on inside the CT |
+| `--target NAME` | `ollama-pi-agent` + `sandbox` | Hostname to install on (repeatable; replaces the default list) |
+| `--hostname NAME` | — | Back-compat alias for `--target` |
+| `--ct-id N` | (hostname lookup) | Target a CT by ID (only valid with one `--target`) |
+| `--root <path>` | `/root/uploads` | Filesystem path the UI exposes (applies to every target) |
+| `--port <n>` | `8080` | Port filebrowser listens on inside each CT |
 | `--admin-user <name>` | (prompt) | Skip the prompt |
 | `--admin-password <pw>` | (prompt) | Skip the prompt |
 | `--dry-run` | — | Preview commands without running them |
 
 **After install:**
 
-Open `http://ollama-pi-agent:8080` from any device on your tailnet, log in, drag files into the browser. They appear at `/root/uploads/` inside CT 200.
+Open `http://ollama-pi-agent:8080` or `http://sandbox:8080` from any device on your tailnet, log in, drag files into the browser. They appear at `/root/uploads/` inside the corresponding CT.
 
-To wire it into Homepage's dashboard, the script's final log lines print a YAML snippet — paste it into your Homepage `services.yaml` under whatever group makes sense:
+The Homepage `services.yaml` gets one tile per filebrowser instance, each guarded by its own `# TD-Addon: filebrowser-<hostname>` marker, so re-running the addon updates only the relevant tile and leaves the other untouched.
 
-```yaml
-- Files:
-    href: http://ollama-pi-agent:8080
-    description: Drop files for pi to use
-    icon: filebrowser.png
-```
-
-Restart Homepage (or wait — its watcher picks up file changes), and the tile shows up on the dashboard.
-
-**Idempotent.** Re-running detects the existing install and updates the admin user's password rather than failing. Safe to invoke again whenever you want to rotate credentials.
+**Idempotent.** Re-running detects each existing install and updates the admin user's password rather than failing. Safe to invoke again whenever you want to rotate credentials or add a new target.
 
 ---
 
@@ -173,7 +172,7 @@ That tells the kernel: rewrite the destination port of any incoming TCP packet b
 | `openwebui` | 80 → 8080 |
 | `homepage` | 80 → 3000 |
 
-`sandbox` and `ollama-pi-agent` aren't included because they don't have a single obvious "primary" web service — `ollama-pi-agent` runs filebrowser on 8080, pi UIs on 9090–9092, and pinning one to port 80 would mask the others.
+`sandbox` and `ollama-pi-agent` aren't included because they don't have a single obvious "primary" web service — `ollama-pi-agent` runs filebrowser on 8080 alongside pi UIs on 9090–9092, and `sandbox` runs filebrowser on 8080 plus whatever Docker workloads you spin up. Pinning one to port 80 would mask the rest.
 
 **Install:**
 
