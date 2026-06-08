@@ -293,9 +293,88 @@ UNIT'"
   log "  Login:       $ADMIN_USER / (your password)"
 }
 
+# ----- Homepage tile registration ------------------------------------------
+# Auto-append our tile block to the homepage CT's services.yaml so the tiles
+# show up on the dashboard without manual paste. Idempotent via a TD-Addon
+# marker comment — re-runs detect the existing block and skip the append.
+add_homepage_tile() {
+  local addon_name="$1"
+  local tile_block="$2"
+  local marker="# TD-Addon: $addon_name"
+
+  local homepage_ctid
+  homepage_ctid="$(find_ct_by_hostname homepage 2>/dev/null || true)"
+  if [[ -z "$homepage_ctid" ]]; then
+    log "  Homepage CT not found — skipping dashboard tile (paste the YAML block above into services.yaml manually if you want it)."
+    return
+  fi
+
+  # Probe for the services.yaml location. Mirrors configure-apps.sh's probe.
+  local services_file
+  services_file="$(pct exec "$homepage_ctid" -- bash -lc '
+    for d in /opt/homepage/config /opt/homepage /homepage/config /etc/homepage /var/lib/homepage/config; do
+      if [[ -f "$d/services.yaml" ]]; then echo "$d/services.yaml"; exit 0; fi
+    done
+  ' 2>/dev/null | tail -n1)"
+
+  if [[ -z "$services_file" ]]; then
+    log "  Could not find services.yaml on the homepage CT — paste manually if you want the tile."
+    return
+  fi
+
+  if pct exec "$homepage_ctid" -- grep -qF "$marker" "$services_file" 2>/dev/null; then
+    log "  Homepage tile for $addon_name already in $services_file."
+    return
+  fi
+
+  log "  Appending Homepage tile for $addon_name to $services_file..."
+  printf '\n%s\n%s\n' "$marker" "$tile_block" | pct exec "$homepage_ctid" -- tee -a "$services_file" > /dev/null
+
+  # Try the common service names. Homepage's hot-reload picks up YAML changes
+  # without a restart on most versions, but a restart is safe.
+  pct exec "$homepage_ctid" -- bash -lc '
+    systemctl restart homepage 2>/dev/null \
+      || systemctl restart gethomepage 2>/dev/null \
+      || true
+  ' >/dev/null 2>&1 || true
+}
+
 # ----- driver --------------------------------------------------------------
 selected cards    && install_cards_ui
 selected terminal && install_terminal_ui
+
+# Register tiles on Homepage. Only includes the UIs that were actually
+# installed in this run (respects --only cards / --only terminal).
+{
+  TILE_BLOCK=""
+  if selected cards; then
+    TILE_BLOCK+="- Pi:
+    - Pi (Cards):
+        href: http://$TARGET_HOSTNAME:$CARDS_PORT
+        description: pi agent — tool cards + thinking blocks
+        icon: mdi-cards"
+  fi
+  if selected terminal; then
+    # Add the terminal entry to the same group if cards was also added,
+    # otherwise start a new group block.
+    if [[ -n "$TILE_BLOCK" ]]; then
+      TILE_BLOCK+="
+    - Pi (Terminal):
+        href: http://$TARGET_HOSTNAME:$TERM_PORT
+        description: pi in a browser terminal
+        icon: mdi-console"
+    else
+      TILE_BLOCK+="- Pi:
+    - Pi (Terminal):
+        href: http://$TARGET_HOSTNAME:$TERM_PORT
+        description: pi in a browser terminal
+        icon: mdi-console"
+    fi
+  fi
+  if [[ -n "$TILE_BLOCK" ]]; then
+    add_homepage_tile "pi-web-uis" "$TILE_BLOCK"
+  fi
+}
 
 # ----- verify --------------------------------------------------------------
 if (( ! DRY_RUN )); then

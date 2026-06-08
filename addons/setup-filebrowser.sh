@@ -176,6 +176,55 @@ if (( ! DRY_RUN )); then
   fi
 fi
 
+# ----- Homepage tile registration ------------------------------------------
+# Auto-append our tile to the homepage CT's services.yaml. Idempotent via a
+# TD-Addon marker comment — re-runs detect the existing block and skip.
+add_homepage_tile() {
+  local addon_name="$1"
+  local tile_block="$2"
+  local marker="# TD-Addon: $addon_name"
+
+  local homepage_ctid
+  homepage_ctid="$(find_ct_by_hostname homepage 2>/dev/null || true)"
+  if [[ -z "$homepage_ctid" ]]; then
+    log "  Homepage CT not found — paste the YAML manually if you want the tile."
+    return
+  fi
+
+  local services_file
+  services_file="$(pct exec "$homepage_ctid" -- bash -lc '
+    for d in /opt/homepage/config /opt/homepage /homepage/config /etc/homepage /var/lib/homepage/config; do
+      if [[ -f "$d/services.yaml" ]]; then echo "$d/services.yaml"; exit 0; fi
+    done
+  ' 2>/dev/null | tail -n1)"
+
+  if [[ -z "$services_file" ]]; then
+    log "  Could not find services.yaml on the homepage CT — paste manually."
+    return
+  fi
+
+  if pct exec "$homepage_ctid" -- grep -qF "$marker" "$services_file" 2>/dev/null; then
+    log "  Homepage tile for $addon_name already in $services_file."
+    return
+  fi
+
+  log "  Appending Homepage tile for $addon_name to $services_file..."
+  printf '\n%s\n%s\n' "$marker" "$tile_block" | pct exec "$homepage_ctid" -- tee -a "$services_file" > /dev/null
+
+  pct exec "$homepage_ctid" -- bash -lc '
+    systemctl restart homepage 2>/dev/null \
+      || systemctl restart gethomepage 2>/dev/null \
+      || true
+  ' >/dev/null 2>&1 || true
+}
+
+FB_TILE="- Tools:
+    - Files:
+        href: http://$TARGET_HOSTNAME:$FB_PORT
+        description: Drop files for pi to use
+        icon: filebrowser.png"
+add_homepage_tile "filebrowser" "$FB_TILE"
+
 # ----- done ---------------------------------------------------------------
 log "==> Done."
 log " "
@@ -183,11 +232,3 @@ log "  Open:   http://$TARGET_HOSTNAME:$FB_PORT  (over Tailscale MagicDNS)"
 log "  Or:     http://$(pct exec "$TARGET_CTID" -- hostname -I 2>/dev/null | awk '{print $1}'):$FB_PORT  (LAN)"
 log "  Login:  $ADMIN_USER / (your password)"
 log "  Files land at: $FB_ROOT/  (inside CT $TARGET_CTID)"
-log " "
-log "To add a tile to Homepage's dashboard, append to /opt/homepage/config/services.yaml"
-log "(or wherever your homepage config lives) under your preferred group:"
-log " "
-log "    - Files:"
-log "        href: http://$TARGET_HOSTNAME:$FB_PORT"
-log "        description: Drop files for pi to use"
-log "        icon: filebrowser.png"
