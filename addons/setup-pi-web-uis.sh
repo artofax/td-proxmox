@@ -11,9 +11,14 @@
 #              pi' but accessible from any device on the tailnet.
 #              https://github.com/tsl0922/ttyd
 #
-# Both run as systemd services so they auto-start on CT boot, both bind 0.0.0.0
-# (Tailscale-reachable via http://ollama-pi-agent:9090 / :9091), both protected
-# by the admin user/password you set at install time.
+#   Port 9092: ttyd-wrapped plain bash shell at /root. Same as 'pct enter 200'
+#              but doesn't auto-launch pi — useful for git/curl/file inspection
+#              without going through the agent. Same ttyd binary as above.
+#
+# All three run as systemd services so they auto-start on CT boot, all bind
+# 0.0.0.0 (Tailscale-reachable via http://ollama-pi-agent:9090, :9091, :9092),
+# the two ttyd services protected by the admin user/password you set at
+# install time. The cards UI has no built-in auth (tailnet boundary trust).
 #
 # Runs on the PVE host. Targets ollama-pi-agent by default — override with
 # --ct-id or --hostname if your CT layout differs.
@@ -32,9 +37,12 @@
 #   --ct-id N        Target CT by ID (default: hostname lookup)
 #   --hostname X     Hostname to look up (default: ollama-pi-agent)
 #   --cards-port N   pi-remote-web-ui port (default: 9090)
-#   --term-port  N   ttyd port (default: 9091)
-#   --only cards     Install only the cards UI (skip ttyd)
-#   --only terminal  Install only ttyd (skip cards UI)
+#   --term-port  N   ttyd-pi port (default: 9091)
+#   --shell-port N   ttyd-shell port (default: 9092)
+#   --only cards     Install only the cards UI
+#   --only terminal  Install only ttyd-pi
+#   --only shell     Install only ttyd-shell
+#   --only cards,shell  Combine subsets with comma
 #   --dry-run        Preview commands
 
 set -Eeuo pipefail
@@ -44,6 +52,7 @@ TARGET_HOSTNAME="ollama-pi-agent"
 TARGET_CTID=""
 CARDS_PORT=9090
 TERM_PORT=9091
+SHELL_PORT=9092
 CARDS_REPO="https://github.com/VVander/pi-remote-web-ui.git"
 CARDS_DIR="/opt/pi-remote-web-ui"
 ADMIN_USER=""
@@ -58,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --hostname)       TARGET_HOSTNAME="$2"; shift 2 ;;
     --cards-port)     CARDS_PORT="$2"; shift 2 ;;
     --term-port)      TERM_PORT="$2"; shift 2 ;;
+    --shell-port)     SHELL_PORT="$2"; shift 2 ;;
     --admin-user)     ADMIN_USER="$2"; shift 2 ;;
     --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
     --only)           ONLY="$2"; shift 2 ;;
@@ -293,6 +303,45 @@ UNIT'"
   log "  Login:       $ADMIN_USER / (your password)"
 }
 
+# ----- 3. SHELL UI (ttyd → plain bash at /root) ----------------------------
+install_shell_ui() {
+  log "==================================================================="
+  log " Installing shell UI (ttyd-wrapped bash at /root) on port $SHELL_PORT"
+  log "==================================================================="
+
+  log "  Installing systemd unit pi-shell.service..."
+  run "pct exec $TARGET_CTID -- bash -c 'cat > /etc/systemd/system/pi-shell.service <<UNIT
+[Unit]
+Description=ttyd serving a plain bash shell at /root
+After=network.target
+
+[Service]
+Type=simple
+User=root
+# Same explicit HOME/USER + inline export trick as pi-term — ttyds pty fork
+# does not reliably propagate systemd Environment= directives.
+Environment=HOME=/root
+Environment=USER=root
+WorkingDirectory=/root
+# The trailing bash keeps the session interactive after the inline exports.
+# Without it, bash -lc would run the command and exit (which would just
+# trigger ttyd to spawn a new session — cycle, but ugly).
+ExecStart=/usr/local/bin/ttyd -W -p $SHELL_PORT -c $ADMIN_USER:$ADMIN_PASSWORD -t titleFixed=\"ollama-pi-agent shell\" bash -lc \"export HOME=/root USER=root; cd /root; exec bash\"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT'"
+
+  run "pct exec $TARGET_CTID -- systemctl daemon-reload"
+  run "pct exec $TARGET_CTID -- systemctl enable pi-shell.service"
+  run "pct exec $TARGET_CTID -- systemctl restart pi-shell.service"
+
+  log "  Shell UI:    http://$TARGET_HOSTNAME:$SHELL_PORT"
+  log "  Login:       $ADMIN_USER / (your password)"
+}
+
 # ----- Homepage tile registration ------------------------------------------
 # Auto-append our tile block to the homepage CT's services.yaml so the tiles
 # show up on the dashboard without manual paste. Idempotent via a TD-Addon
@@ -342,35 +391,42 @@ add_homepage_tile() {
 # ----- driver --------------------------------------------------------------
 selected cards    && install_cards_ui
 selected terminal && install_terminal_ui
+selected shell    && install_shell_ui
 
-# Register tiles on Homepage. Only includes the UIs that were actually
-# installed in this run (respects --only cards / --only terminal).
+# Register tiles on Homepage. Only includes the UIs actually installed
+# in this run (respects --only cards / --only terminal / --only shell).
 {
   TILE_BLOCK=""
+  _append_tile() {
+    # First tile sets up the "- Pi:" group header, subsequent tiles indent.
+    if [[ -z "$TILE_BLOCK" ]]; then
+      TILE_BLOCK="- Pi:
+$1"
+    else
+      TILE_BLOCK="$TILE_BLOCK
+$1"
+    fi
+  }
+
   if selected cards; then
-    TILE_BLOCK+="- Pi:
-    - Pi (Cards):
+    _append_tile "    - Pi (Cards):
         href: http://$TARGET_HOSTNAME:$CARDS_PORT
         description: pi agent — tool cards + thinking blocks
         icon: mdi-cards"
   fi
   if selected terminal; then
-    # Add the terminal entry to the same group if cards was also added,
-    # otherwise start a new group block.
-    if [[ -n "$TILE_BLOCK" ]]; then
-      TILE_BLOCK+="
-    - Pi (Terminal):
+    _append_tile "    - Pi (Terminal):
         href: http://$TARGET_HOSTNAME:$TERM_PORT
         description: pi in a browser terminal
         icon: mdi-console"
-    else
-      TILE_BLOCK+="- Pi:
-    - Pi (Terminal):
-        href: http://$TARGET_HOSTNAME:$TERM_PORT
-        description: pi in a browser terminal
-        icon: mdi-console"
-    fi
   fi
+  if selected shell; then
+    _append_tile "    - Pi (Shell):
+        href: http://$TARGET_HOSTNAME:$SHELL_PORT
+        description: plain bash at /root on ollama-pi-agent
+        icon: mdi-terminal"
+  fi
+
   if [[ -n "$TILE_BLOCK" ]]; then
     add_homepage_tile "pi-web-uis" "$TILE_BLOCK"
   fi
@@ -379,7 +435,9 @@ selected terminal && install_terminal_ui
 # ----- verify --------------------------------------------------------------
 if (( ! DRY_RUN )); then
   log "Verifying services..."
-  for unit in pi-cards pi-term; do
+  for spec in "pi-cards:cards" "pi-term:terminal" "pi-shell:shell"; do
+    unit="${spec%%:*}"; key="${spec##*:}"
+    selected "$key" || continue
     if pct exec "$TARGET_CTID" -- systemctl is-active "$unit" >/dev/null 2>&1; then
       log "  $unit: running"
     else
@@ -391,16 +449,6 @@ fi
 # ----- done ----------------------------------------------------------------
 log "==> Done."
 log " "
-log "  Cards UI:    http://$TARGET_HOSTNAME:$CARDS_PORT   (no auth; tailnet-protected)"
-log "  Terminal UI: http://$TARGET_HOSTNAME:$TERM_PORT   (basic auth: $ADMIN_USER / your password)"
-log " "
-log "Homepage tile snippet (append to /opt/homepage/config/services.yaml):"
-log " "
-log "    - Pi (Cards):"
-log "        href: http://$TARGET_HOSTNAME:$CARDS_PORT"
-log "        description: pi agent — tool cards + thinking blocks"
-log "        icon: mdi-cards"
-log "    - Pi (Terminal):"
-log "        href: http://$TARGET_HOSTNAME:$TERM_PORT"
-log "        description: pi in a browser terminal"
-log "        icon: mdi-console"
+selected cards    && log "  Cards UI:    http://$TARGET_HOSTNAME:$CARDS_PORT   (no auth; tailnet-protected)"
+selected terminal && log "  Terminal UI: http://$TARGET_HOSTNAME:$TERM_PORT   (basic auth: $ADMIN_USER / your password)"
+selected shell    && log "  Shell UI:    http://$TARGET_HOSTNAME:$SHELL_PORT   (basic auth: $ADMIN_USER / your password)"
