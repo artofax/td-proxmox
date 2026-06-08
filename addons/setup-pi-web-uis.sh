@@ -257,9 +257,10 @@ After=network.target
 [Service]
 Type=simple
 User=root
-# HOME and USER must be set explicitly. Without them, Ollama panics with
-# 'panic: \$HOME is not defined' because systemd doesn't pass HOME when
-# User= is implicit; ttyd's spawned bash sees an empty \$HOME.
+# HOME and USER must be set explicitly. Without them, Ollama panics at
+# startup (reads HOME during config init) because systemd does not pass
+# these env vars to services where User= is implicit, and ttyds child
+# shell inherits the empty environment.
 Environment=HOME=/root
 Environment=USER=root
 WorkingDirectory=/root
