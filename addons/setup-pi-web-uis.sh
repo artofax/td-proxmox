@@ -232,7 +232,10 @@ WantedBy=multi-user.target
 UNIT'"
 
   run "pct exec $TARGET_CTID -- systemctl daemon-reload"
-  run "pct exec $TARGET_CTID -- systemctl enable --now pi-cards.service"
+  run "pct exec $TARGET_CTID -- systemctl enable pi-cards.service"
+  # restart (not start) so re-runs pick up an updated ExecStart.
+  # systemctl enable --now would skip the restart when already-running.
+  run "pct exec $TARGET_CTID -- systemctl restart pi-cards.service"
 
   log "  Cards UI: http://$TARGET_HOSTNAME:$CARDS_PORT"
   log "  Note: VVander's UI doesn't have built-in auth; rely on tailnet ACLs"
@@ -282,7 +285,9 @@ WantedBy=multi-user.target
 UNIT'"
 
   run "pct exec $TARGET_CTID -- systemctl daemon-reload"
-  run "pct exec $TARGET_CTID -- systemctl enable --now pi-term.service"
+  run "pct exec $TARGET_CTID -- systemctl enable pi-term.service"
+  # restart (not start) so re-runs pick up an updated ExecStart.
+  run "pct exec $TARGET_CTID -- systemctl restart pi-term.service"
 
   log "  Terminal UI: http://$TARGET_HOSTNAME:$TERM_PORT"
   log "  Login:       $ADMIN_USER / (your password)"
