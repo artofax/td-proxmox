@@ -12,6 +12,7 @@ Run sheet and core scripts live in **[`automation/`](automation/)**:
 Optional extras live in **[`addons/`](addons/)** — each script is self-contained and assumes a stack already built by the `automation/` scripts:
 
 - **`setup-filebrowser.sh`** — installs filebrowser on `ollama-pi-agent`, exposes `/root/uploads/` as a drag-and-drop web UI at `http://ollama-pi-agent:8080`. Drop a PDF or markdown in the browser, immediately reference it in a pi prompt.
+- **`setup-pi-web-uis.sh`** — installs two browser UIs for pi on `ollama-pi-agent`: an agent-aware "cards" UI (tool calls and thinking as expandable cards, multi-tab sessions) on port 9090, and a `ttyd`-wrapped terminal UI (xterm.js in a browser tab) on port 9091.
 
 From `/root` on a fresh PVE install:
 
