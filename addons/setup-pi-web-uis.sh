@@ -209,9 +209,12 @@ After=network.target
 
 [Service]
 Type=simple
+User=root
 WorkingDirectory=$CARDS_DIR
 ExecStart=$NODE_BIN_FOR_UNIT dist-server/index.js
 Environment=NODE_ENV=production
+Environment=HOME=/root
+Environment=USER=root
 Restart=on-failure
 RestartSec=5
 
@@ -244,6 +247,13 @@ After=network.target
 
 [Service]
 Type=simple
+User=root
+# HOME and USER must be set explicitly. Without them, Ollama panics with
+# 'panic: \$HOME is not defined' because systemd doesn't pass HOME when
+# User= is implicit; ttyd's spawned bash sees an empty \$HOME.
+Environment=HOME=/root
+Environment=USER=root
+WorkingDirectory=/root
 # -W : writable (allow user input)
 # -p : port to bind
 # -c : basic auth user:pass
