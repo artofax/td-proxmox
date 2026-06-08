@@ -12,6 +12,7 @@ If you haven't run the automation scripts yet, start there: [automation/README-a
 |---|---|---|---|
 | [`setup-filebrowser.sh`](setup-filebrowser.sh) | Drag-and-drop web UI for getting files into `ollama-pi-agent` where pi can read them | `ollama-pi-agent` | ~3 min |
 | [`setup-pi-web-uis.sh`](setup-pi-web-uis.sh) | Three browser UIs on `ollama-pi-agent`: cards (9090), pi terminal (9091), plain bash shell (9092) | `ollama-pi-agent` | ~5 min |
+| [`setup-port80-redirect.sh`](setup-port80-redirect.sh) | Kernel-level NAT redirect so `http://gitea`, `http://openwebui`, `http://homepage` work without typing `:3000` / `:8080` | `gitea`, `openwebui`, `homepage` | ~1 min |
 
 ---
 
@@ -145,6 +146,70 @@ The script prompts for an admin username + password (used for the ttyd basic aut
 **Security note.** The cards UI has no built-in authentication — it inherits trust from whoever can reach port 9090 on the tailnet. For a personal homelab with a closed tailnet that's fine. If you have multiple tailnet users and want to restrict the cards UI further, the easiest fix is a Tailscale ACL rule limiting port 9090 to your own user. ttyd on 9091 has HTTP basic auth as a second layer.
 
 **Idempotent.** Re-running detects an existing clone and `git pull`s the latest. Systemd units are recreated and restarted.
+
+---
+
+---
+
+## `setup-port80-redirect.sh`
+
+Lets you type `http://gitea` instead of `http://gitea:3000`. Same for `http://openwebui` and `http://homepage`. The apps stay on their high ports; the kernel quietly rewrites incoming `:80` traffic to the real port before it reaches the app.
+
+**Why these defaults exist in the first place.** Ports below 1024 (the "privileged" range) require root or `CAP_NET_BIND_SERVICE` on Linux. Modern web apps run as a dedicated unprivileged user for security, so they default to higher ports (3000, 8080) that don't need elevated permissions. In a Docker / multi-tenant world this is normal — you put a reverse proxy on 80 and route to the apps' high ports. Our "one CT per app + Tailscale MagicDNS" homelab is the unusual case where typing the port is friction without payoff.
+
+**How it works.** A single `iptables` NAT rule per CT:
+
+```
+iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 3000
+```
+
+That tells the kernel: rewrite the destination port of any incoming TCP packet bound for :80 to :3000 before the app sees it. The app itself is unchanged — it keeps listening on 3000 and never knows. Both URLs work: `http://gitea` and `http://gitea:3000`. A small systemd oneshot re-applies the rule on every boot so it survives reboots without needing `iptables-persistent`.
+
+**Targets:**
+
+| Hostname | Redirect |
+|---|---|
+| `gitea` | 80 → 3000 |
+| `openwebui` | 80 → 8080 |
+| `homepage` | 80 → 3000 |
+
+`docker` and `ollama-pi-agent` aren't included because they don't have a single obvious "primary" web service — `ollama-pi-agent` runs filebrowser on 8080, pi UIs on 9090–9092, and pinning one to port 80 would mask the others.
+
+**Install:**
+
+```bash
+# On the PVE host
+curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/addons/setup-port80-redirect.sh \
+  -o /root/setup-port80-redirect.sh
+chmod +x /root/setup-port80-redirect.sh
+/root/setup-port80-redirect.sh
+```
+
+No prompts. Loops over each `hostname:port` pair in the script's `REDIRECTS=(...)` array, finds the CT, applies the rule, drops a systemd unit. Idempotent — re-running checks for the rule with `iptables -C` before adding, so no duplicate rules pile up.
+
+**Test from your workstation:**
+
+```bash
+curl -sI http://gitea  | head -1   # Should be 200 / 302 / 303 (Gitea login redirect)
+curl -sI http://homepage | head -1
+```
+
+**Uninstall:**
+
+```bash
+/root/setup-port80-redirect.sh --uninstall
+```
+
+Removes the systemd unit and deletes the iptables rule from each CT. The apps continue to work on their original ports.
+
+**Flags:**
+
+| Flag | What it does |
+|---|---|
+| `--uninstall` | Reverse the changes (remove rules + units, leave apps untouched) |
+| `--dry-run` | Print commands without executing |
+
+**Extending.** To add another CT, edit the `REDIRECTS=(...)` array at the top of the script. Each entry is `hostname:port`. To add SSL termination later, the natural upgrade is to drop a small reverse proxy (Caddy is a one-binary fit) on each CT and let it handle 80 → 443 + auto-HTTPS via Tailscale's MagicDNS certificates.
 
 ---
 
