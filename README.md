@@ -2,12 +2,16 @@
 
 Bootstrap a Proxmox VE 9.x homelab — five LXC containers, Tailscale-joined, with Gitea + OpenWebUI + Homepage preconfigured and an Ollama-hosted `pi` coding agent ready to drive the rest.
 
-Run sheet and scripts live in **[`automation/`](automation/)**:
+Run sheet and core scripts live in **[`automation/`](automation/)**:
 
 - **`bootstrap-pve.sh`** — fresh PVE host → five running CTs (`ollama-pi-agent`, `docker`, `gitea`, `openwebui`, `homepage`), all on your tailnet.
 - **`setup-ollama-pi.sh`** — installs Ollama on `ollama-pi-agent` and `openwebui`, walks you through device pairing (one browser click per CT), pulls a model, installs `pi` on `ollama-pi-agent`.
 - **`configure-apps.sh`** — Gitea admin + access token, OpenWebUI admin + OpenRouter connection, pi credentials seeded on `ollama-pi-agent`, Homepage dashboard populated.
 - **`README-automation.md`** — the operator run sheet that ties it all together.
+
+Optional extras live in **[`addons/`](addons/)** — each script is self-contained and assumes a stack already built by the `automation/` scripts:
+
+- **`setup-filebrowser.sh`** — installs filebrowser on `ollama-pi-agent`, exposes `/root/uploads/` as a drag-and-drop web UI at `http://ollama-pi-agent:8080`. Drop a PDF or markdown in the browser, immediately reference it in a pi prompt.
 
 From `/root` on a fresh PVE install:
 
