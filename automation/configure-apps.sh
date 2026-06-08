@@ -472,19 +472,26 @@ configure_pi_host() {
   ct_up "$PI_HOST_CTID"
   log "Seeding pi config on ollama-pi-agent (CT $PI_HOST_CTID)..."
 
-  # Derive gitea hostname inside the tailnet. MagicDNS makes 'gitea' resolve;
-  # fall back to the CT's LAN IP otherwise.
-  local GITEA_HOST="gitea"
-  if (( ! DRY_RUN )) && [[ -n "${GITEA_IP:-}" ]]; then
-    GITEA_HOST="$GITEA_IP"
-  fi
-
   # 1. .netrc for Gitea (so `git push` and curl-with-machine work without prompting)
-  log "  Writing /root/.netrc with Gitea credentials..."
-  run "pct exec $PI_HOST_CTID -- bash -c 'cat > /root/.netrc <<NETRC
-machine $GITEA_HOST
+  #
+  # libcurl matches .netrc machine entries by the EXACT hostname from the URL.
+  # Inside the tailnet, scripts use 'http://gitea:3000/...' (MagicDNS); on the
+  # LAN they might use 'http://<gitea-ct-ip>:3000/...'. Both URL forms are
+  # common, so we write a machine entry for each. Without this, the IP-keyed
+  # entry won't match a 'gitea' URL and git push falls through to prompting
+  # for username + password every time.
+  log "  Writing /root/.netrc with Gitea credentials (both 'gitea' and IP)..."
+  local GITEA_IP_LINE=""
+  if [[ -n "${GITEA_IP:-}" ]]; then
+    GITEA_IP_LINE="
+machine $GITEA_IP
   login   $ADMIN_USER
-  password ${GITEA_TOKEN:-CHANGEME}
+  password ${GITEA_TOKEN:-CHANGEME}"
+  fi
+  run "pct exec $PI_HOST_CTID -- bash -c 'cat > /root/.netrc <<NETRC
+machine gitea
+  login   $ADMIN_USER
+  password ${GITEA_TOKEN:-CHANGEME}$GITEA_IP_LINE
 NETRC
 chmod 600 /root/.netrc'"
 
