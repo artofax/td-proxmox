@@ -117,6 +117,12 @@ run "pct exec $TARGET_CTID -- mkdir -p '$FB_ROOT'"
 run "pct exec $TARGET_CTID -- chmod 750 '$FB_ROOT'"
 
 # ----- 3. initialize the filebrowser DB ------------------------------------
+# Stop the service first so `filebrowser config set` can get a lock on
+# filebrowser.db. Without this, re-runs against an already-running filebrowser
+# time out: 'Error: timeout' (the bolt DB file is held by the live process).
+log "Stopping filebrowser (if running) to update config..."
+run "pct exec $TARGET_CTID -- systemctl stop filebrowser 2>/dev/null || true"
+
 log "Initializing filebrowser database..."
 run "pct exec $TARGET_CTID -- bash -lc '
   mkdir -p /etc/filebrowser
@@ -162,7 +168,10 @@ WantedBy=multi-user.target
 UNIT'"
 
 run "pct exec $TARGET_CTID -- systemctl daemon-reload"
-run "pct exec $TARGET_CTID -- systemctl enable --now filebrowser"
+run "pct exec $TARGET_CTID -- systemctl enable filebrowser"
+# restart (not start) so re-runs pick up unit-file or config changes.
+# We stopped the service earlier to release the DB lock; this brings it back.
+run "pct exec $TARGET_CTID -- systemctl restart filebrowser"
 
 # ----- 6. verify -----------------------------------------------------------
 CT_IP=""
