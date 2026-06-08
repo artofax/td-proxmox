@@ -128,8 +128,29 @@ resolve_admin_user
 resolve_admin_password
 
 # ----- prereqs (Node, git, ttyd) --------------------------------------------
-log "Installing prereqs (git, ttyd, build-essential) inside CT..."
-run "pct exec $TARGET_CTID -- bash -lc 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ttyd build-essential'"
+# ttyd isn't in Debian 12's default repos (was dropped between releases). The
+# project publishes static musl binaries on GitHub releases; we use those.
+log "Installing prereqs (git, build-essential) via apt..."
+run "pct exec $TARGET_CTID -- bash -lc 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git build-essential curl'"
+
+if pct exec "$TARGET_CTID" -- bash -lc 'command -v ttyd' >/dev/null 2>&1; then
+  log "ttyd already installed."
+else
+  log "Installing ttyd from GitHub releases (static musl binary)..."
+  run "pct exec $TARGET_CTID -- bash -lc '
+    set -e
+    arch=\$(uname -m)
+    case \"\$arch\" in
+      x86_64)  ttyd_arch=x86_64 ;;
+      aarch64) ttyd_arch=aarch64 ;;
+      armv7l)  ttyd_arch=armhf ;;
+      *) echo \"Unsupported architecture for ttyd binary: \$arch\" >&2; exit 1 ;;
+    esac
+    curl -fsSL \"https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.\${ttyd_arch}\" -o /usr/local/bin/ttyd
+    chmod +x /usr/local/bin/ttyd
+    /usr/local/bin/ttyd --version 2>&1 | head -1
+  '"
+fi
 
 # pi installed by setup-ollama-pi.sh drops a standalone Node under
 # /root/.local/share/pi-node/node-v.../bin. We reuse that for the cards UI
@@ -228,7 +249,7 @@ Type=simple
 # -c : basic auth user:pass
 # -t titleFixed : set the browser tab title
 # bash -lc to make sure /usr/local/bin (Ollama, pi) is on PATH
-ExecStart=/usr/bin/ttyd -W -p $TERM_PORT -c $ADMIN_USER:$ADMIN_PASSWORD -t titleFixed=\"pi terminal\" bash -lc \"ollama launch pi\"
+ExecStart=/usr/local/bin/ttyd -W -p $TERM_PORT -c $ADMIN_USER:$ADMIN_PASSWORD -t titleFixed=\"pi terminal\" bash -lc \"ollama launch pi\"
 Restart=on-failure
 RestartSec=5
 
