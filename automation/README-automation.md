@@ -111,7 +111,7 @@ The script walks both `ollama-pi-agent` and `openwebui` automatically (resolved 
 1. Installs `curl`, `zstd`, and Ollama via the official `install.sh` (skip if already installed).
 2. Drops `/etc/profile.d/usrlocal-path.sh` and appends to `/etc/bash.bashrc` so future `pct enter` sessions see `/usr/local/bin` (Ollama's install location) on PATH.
 3. Runs `ollama signin` — Ollama prints a URL like `https://ollama.com/connect?name=<hostname>&key=...` to your terminal. **Visit it in a browser logged into ollama.com, click Connect, and the script resumes.** Two browser clicks per fresh host — once for each CT.
-4. Pulls the default model (`gemma3:12b-cloud`, override with `--model …`).
+4. Pulls the default model (`gemma4:31b-cloud`, override with `--model …`).
 5. On `ollama-pi-agent` only: binds Ollama to `0.0.0.0:11434` (so other tailnet devices can hit the API), installs pi from `pi.dev/install.sh`, appends Node.js bin to `PATH`, generates `/root/.ssh/id_ed25519` and pushes the pubkey into `sandbox`, `gitea`, `openwebui`, and `homepage`'s `authorized_keys` — so pi can `ssh root@sandbox` (etc.) without passwords or fingerprint prompts.
 
 Idempotent at every step — re-runs detect what's already installed (Ollama binary, model pulled, pi installed, PATH already set) and skip cleanly. So if anything fails partway, just re-run.
@@ -121,7 +121,7 @@ Idempotent at every step — re-runs detect what's already installed (Ollama bin
 - `--ct-id N` — target only that CT instead of both
 - `--skip-pi` — set up Ollama everywhere, skip pi install entirely
 - `--skip-signin` — install Ollama but don't pair (you'll pair manually later)
-- `--model gemma3:31b-cloud` — different default model
+- `--model gemma3:12b-cloud` — different default model
 
 After this phase, `openwebui` chat dropdown lists local Ollama models alongside OpenRouter, and `ollama launch pi` works inside `ollama-pi-agent`.
 

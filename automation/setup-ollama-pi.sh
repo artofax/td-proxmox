@@ -17,7 +17,7 @@
 #
 # Usage:
 #   ./setup-ollama-pi.sh                          # default: walk all targets
-#   ./setup-ollama-pi.sh --model gemma3:31b-cloud # different default model
+#   ./setup-ollama-pi.sh --model gemma3:12b-cloud # different default model
 #   ./setup-ollama-pi.sh --ct-id 200              # single CT (still installs pi if hostname matches a "with-pi" target)
 #   ./setup-ollama-pi.sh --ct-id 103 --skip-pi    # explicit single-CT, no pi
 #   ./setup-ollama-pi.sh --skip-signin            # install Ollama, pair manually later
@@ -27,7 +27,7 @@
 set -Eeuo pipefail
 
 # ----- defaults --------------------------------------------------------------
-DEFAULT_MODEL="gemma3:12b-cloud"
+DEFAULT_MODEL="gemma4:31b-cloud"
 MODEL=""
 PI_CTID=""
 SKIP_SIGNIN=0
