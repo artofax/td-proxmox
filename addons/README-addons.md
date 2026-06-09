@@ -4,6 +4,8 @@ Optional scripts that layer on top of the core homelab built by [`automation/`](
 
 If you haven't run the automation scripts yet, start there: [automation/README-automation.md](../automation/README-automation.md).
 
+For pi (or you, writing scripts that pi runs) registering tiles on the Homepage dashboard, see [homepage-tile-convention.md](homepage-tile-convention.md) — convention reference + a `register_homepage_tile` bash function you can paste into install scripts. Used when standing up Docker apps on `sandbox` and wanting them to appear on the dashboard.
+
 ---
 
 ## Available addons
