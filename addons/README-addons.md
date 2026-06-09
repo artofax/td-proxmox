@@ -14,6 +14,7 @@ If you haven't run the automation scripts yet, start there: [automation/README-a
 | [`setup-pi-web-uis.sh`](setup-pi-web-uis.sh) | Three browser UIs on `ollama-pi-agent`: cards (9090), pi terminal (9091), plain bash shell (9092) | `ollama-pi-agent` | ~5 min |
 | [`setup-port80-redirect.sh`](setup-port80-redirect.sh) | Kernel-level NAT redirect so `http://gitea`, `http://openwebui`, `http://homepage` work without typing `:3000` / `:8080` | `gitea`, `openwebui`, `homepage` | ~1 min |
 | [`setup-pve-etc-backup.sh`](setup-pve-etc-backup.sh) | Daily systemd timer that snapshots `/etc/pve` + host network/SSH/apt config to your backup drive (vzdump doesn't cover these) | PVE host | <1 min |
+| [`setup-vzdump-schedule.sh`](setup-vzdump-schedule.sh) | Idempotent vzdump job in `/etc/pve/jobs.cfg` — nightly CT backups to your backup drive with sensible retention | PVE host | <1 min |
 
 ---
 
@@ -282,6 +283,89 @@ systemctl start pve-cluster
 ```
 
 For most fields (`/etc/network/interfaces`, `/root/.ssh/`, apt sources) you can extract straight into `/` while PVE is running.
+
+---
+
+## `setup-vzdump-schedule.sh`
+
+Installs a nightly `vzdump` job into `/etc/pve/jobs.cfg` so PVE backs up every CT to your backup drive automatically. Complements `setup-pve-etc-backup.sh`: that script captures the *host* config (the PVE identity), this one captures the *CT data* (root filesystems, running state). Together they make a fresh PVE install + USB drive a complete restore source.
+
+PVE picks up changes to `jobs.cfg` automatically — no daemon restart, no GUI fiddling.
+
+**Defaults** (matched to the rest of this stack):
+
+| Setting | Default | Why |
+|---|---|---|
+| Schedule | `02:00` daily | 30 min after `setup-pve-etc-backup`'s 01:30 default — config snapshot lands first |
+| Storage | `pve-backup` | The USB drive registered by the storage walkthrough below |
+| Mode | `snapshot` | Live backup on LVM-thin; CT stays running with near-zero pause |
+| Compression | `zstd` | Same format as the host-config tarball; fast + small |
+| Retention | `keep-daily=7, keep-weekly=4, keep-monthly=2` | ~13 backups, predictable disk usage |
+| Includes | `all` | Every CT (and any VMs you add later) |
+| Job ID | `td-nightly` | Lets the script find + replace its own block on re-run |
+
+**Install:**
+
+```bash
+# On the PVE host
+curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/addons/setup-vzdump-schedule.sh \
+  -o /root/setup-vzdump-schedule.sh
+chmod +x /root/setup-vzdump-schedule.sh
+/root/setup-vzdump-schedule.sh
+```
+
+End state: a `vzdump: td-nightly` stanza in `/etc/pve/jobs.cfg`, scheduled for tomorrow 02:00. To verify in the GUI: Datacenter → Backup, you should see one row labeled `td-nightly`.
+
+To run a backup immediately (foreground, takes a while depending on your CT sizes):
+
+```bash
+/root/setup-vzdump-schedule.sh --run-now
+```
+
+**Flags:**
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--job-id ID` | `td-nightly` | Stanza identifier used for idempotent updates |
+| `--storage NAME` | `pve-backup` | Backup storage target (must include `backup` in its content types) |
+| `--schedule HH:MM` | `02:00` | Daily run time |
+| `--mode KIND` | `snapshot` | `snapshot` (live) / `suspend` (brief pause) / `stop` (clean) |
+| `--compress KIND` | `zstd` | `zstd` / `gzip` / `lzo` / `none` |
+| `--retention SPEC` | `keep-daily=7,keep-weekly=4,keep-monthly=2` | PVE retention spec |
+| `--include SPEC` | `all` | `all` / `pool:<name>` / comma-separated CT IDs (e.g. `100,102,200`) |
+| `--mailto EMAIL` | — | Send notifications to an address |
+| `--notify-mode MODE` | `failure` | `failure` or `always` — paired with `--mailto` |
+| `--run-now` | — | Trigger one immediate backup after writing the job |
+| `--uninstall` | — | Remove the job stanza from `jobs.cfg` |
+| `--dry-run` | — | Preview without writing |
+
+**Pre-flight checks:** the script verifies the storage target exists and has `backup` listed in its content types before touching `jobs.cfg`. A common gotcha is registering a directory storage with only `iso,vztmpl` content and then trying to use it for backups — the script catches that and tells you how to fix it (`pvesm set <name> --content backup,iso,vztmpl`).
+
+**Idempotent:** re-running with different flags updates the existing stanza rather than appending a duplicate. The job-id is the key — if you want a second vzdump job (say, weekly backups of a specific pool), invoke with a different `--job-id`.
+
+**Uninstall:**
+
+```bash
+/root/setup-vzdump-schedule.sh --uninstall
+```
+
+Removes the stanza; existing backup files on the drive are untouched.
+
+**Restore drill — worth doing once:**
+
+```bash
+# Pick a small CT (sandbox is ~300 MB)
+CTID=$(pct list | awk '/sandbox/ {print $1}')
+LATEST=$(ls -t /mnt/pve-backup/dump/vzdump-lxc-$CTID-*.tar.zst | head -1)
+
+# Restore into a throwaway CTID
+pct restore 999 "$LATEST" --storage local-lvm --hostname sandbox-restore-test
+pct start 999
+pct exec 999 -- hostname && pct exec 999 -- docker ps
+pct destroy 999 --purge
+```
+
+Untested backups are wishes, not backups.
 
 ---
 
