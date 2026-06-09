@@ -14,6 +14,7 @@ Optional extras live in **[`addons/`](addons/)** — each script is self-contain
 - **`setup-filebrowser.sh`** — installs filebrowser on both `ollama-pi-agent` and `sandbox` (configurable), exposing `/root/uploads/` as a drag-and-drop web UI on each (`http://ollama-pi-agent:8080`, `http://sandbox:8080`). Drop a PDF or markdown in the pi UI and reference it from a pi prompt; drop a Dockerfile or compose file in the sandbox UI and `ssh root@sandbox` to use it.
 - **`setup-pi-web-uis.sh`** — installs three browser UIs on `ollama-pi-agent`: a cards UI (tool calls/thinking blocks, multi-tab session) on 9090, a `ttyd`-wrapped pi terminal on 9091, and a plain `bash` shell on 9092.
 - **`setup-port80-redirect.sh`** — adds a kernel-level NAT redirect on `gitea`, `openwebui`, and `homepage` so you can type `http://gitea` instead of `http://gitea:3000`. Apps unchanged; both URLs work.
+- **`setup-pve-etc-backup.sh`** — daily systemd timer on the PVE host that snapshots `/etc/pve` + host network/SSH/apt config to your backup drive as a compressed tarball. Closes the gap `vzdump` leaves (CT data but not PVE's own state). Mountpoint-checked so an unplugged backup drive becomes a clean skip, never a host-root pollution.
 
 From `/root` on a fresh PVE install:
 

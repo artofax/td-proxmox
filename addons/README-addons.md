@@ -8,11 +8,12 @@ If you haven't run the automation scripts yet, start there: [automation/README-a
 
 ## Available addons
 
-| Script | What it does | Target CT | Time |
+| Script | What it does | Target | Time |
 |---|---|---|---|
 | [`setup-filebrowser.sh`](setup-filebrowser.sh) | Drag-and-drop web UI for getting files into `ollama-pi-agent` (pi reads them) and `sandbox` (Dockerfiles, compose files, project source) | `ollama-pi-agent`, `sandbox` | ~3 min |
 | [`setup-pi-web-uis.sh`](setup-pi-web-uis.sh) | Three browser UIs on `ollama-pi-agent`: cards (9090), pi terminal (9091), plain bash shell (9092) | `ollama-pi-agent` | ~5 min |
 | [`setup-port80-redirect.sh`](setup-port80-redirect.sh) | Kernel-level NAT redirect so `http://gitea`, `http://openwebui`, `http://homepage` work without typing `:3000` / `:8080` | `gitea`, `openwebui`, `homepage` | ~1 min |
+| [`setup-pve-etc-backup.sh`](setup-pve-etc-backup.sh) | Daily systemd timer that snapshots `/etc/pve` + host network/SSH/apt config to your backup drive (vzdump doesn't cover these) | PVE host | <1 min |
 
 ---
 
@@ -209,6 +210,108 @@ Removes the systemd unit and deletes the iptables rule from each CT. The apps co
 | `--dry-run` | Print commands without executing |
 
 **Extending.** To add another CT, edit the `REDIRECTS=(...)` array at the top of the script. Each entry is `hostname:port`. To add SSL termination later, the natural upgrade is to drop a small reverse proxy (Caddy is a one-binary fit) on each CT and let it handle 80 → 443 + auto-HTTPS via Tailscale's MagicDNS certificates.
+
+---
+
+## `setup-pve-etc-backup.sh`
+
+Installs a daily systemd timer on the **PVE host itself** (not a CT) that snapshots PVE's host-level configuration to a compressed tarball on your backup drive. Closes a gap in `vzdump`: vzdump backs up CT *data* but not PVE's own state, so a fresh PVE install from a CT-only backup can't even mount the backup drive without redoing every storage definition by hand.
+
+**What's in each tarball:**
+
+- `/etc/pve` — cluster, storage, ACL, user db (PVE's FUSE config)
+- `/var/lib/pve-cluster/config.db` — the sqlite DB behind `/etc/pve`
+- `/etc/network/interfaces` + `interfaces.d/` — `vmbr0`, bonds, VLANs
+- `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`
+- `/etc/ssh/ssh_host_*_key*` — host keys (preserve fingerprints across rebuilds)
+- `/etc/ssh/sshd_config` — sshd policy
+- `/root/.ssh/` — admin authorized_keys + any private keys you keep there
+- `/etc/apt/sources.list` + `/etc/apt/sources.list.d/` — deb822 `.sources` files written by `bootstrap-pve.sh`
+
+Format: zstd-compressed tar, named `pve-etc-<hostname>-<YYYYMMDD-HHMMSS>.tar.zst` (matches vzdump's default compression). Typical size: a few MB.
+
+**Prereqs:**
+
+- USB / external backup drive mounted somewhere persistent (see [the USB backup walkthrough](#setting-up-a-usb-drive-as-a-backup-target) below if you haven't done this yet)
+- Default backup path is `/mnt/pve-backup/etc-snapshots/` — pass `--backup-dir` if yours is elsewhere
+
+**Install:**
+
+```bash
+# On the PVE host
+curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/addons/setup-pve-etc-backup.sh \
+  -o /root/setup-pve-etc-backup.sh
+chmod +x /root/setup-pve-etc-backup.sh
+/root/setup-pve-etc-backup.sh --run-now
+```
+
+`--run-now` triggers one immediate run after installing the timer, so you see a tarball land before you walk away. End state: a daily 01:30 timer, last 14 tarballs retained per host, on-target backup directory.
+
+**Flags:**
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--backup-dir PATH` | `/mnt/pve-backup/etc-snapshots` | Where tarballs land |
+| `--keep N` | `14` | How many tarballs to retain per host (oldest pruned) |
+| `--time HH:MM` | `01:30` | Daily run time (set 30 min before your vzdump window) |
+| `--run-now` | — | Trigger one immediate run after install |
+| `--dry-run` | — | Preview commands without executing |
+
+**Safety: mount check before write.** The backup script `mountpoint -q`s the backup directory's parent before writing anything. If the USB drive is unplugged or unmounted, the run exits 0 with a "skipped" log line — it will never silently dump a tarball into the host's root filesystem and fill `/`.
+
+**Verify:**
+
+```bash
+systemctl list-timers pve-etc-backup.timer
+journalctl -u pve-etc-backup.service -n 30 --no-pager
+ls -lh /mnt/pve-backup/etc-snapshots/
+```
+
+**Restore (after a host rebuild):**
+
+```bash
+# After installing PVE on a fresh disk, mount your backup drive, then:
+cd /mnt/pve-backup/etc-snapshots
+ls -lt pve-etc-*.tar.zst | head -1                    # find the latest
+# Inspect first:
+tar --zstd -tf pve-etc-<host>-<stamp>.tar.zst | less
+# Selectively restore /etc/pve (PVE must be stopped):
+systemctl stop pve-cluster
+tar --zstd -xf pve-etc-<host>-<stamp>.tar.zst -C / etc/pve
+systemctl start pve-cluster
+```
+
+For most fields (`/etc/network/interfaces`, `/root/.ssh/`, apt sources) you can extract straight into `/` while PVE is running.
+
+---
+
+## Setting up a USB drive as a backup target
+
+`setup-pve-etc-backup.sh` (and `vzdump`) need somewhere to write. If you haven't already prepped a USB drive on the PVE host, the short version:
+
+```bash
+# 1. Identify the drive
+lsblk -o NAME,SIZE,MODEL,TRAN,FSTYPE,MOUNTPOINT       # look for TRAN=usb
+
+# 2. Wipe + format (replace sdb with your device — and double-check you've got the right one)
+wipefs -a /dev/sdb
+parted -s /dev/sdb mklabel gpt mkpart primary ext4 0% 100%
+mkfs.ext4 -L pve-backup /dev/sdb1
+
+# 3. Mount persistently using UUID + nofail
+blkid /dev/sdb1                                       # copy the UUID
+mkdir -p /mnt/pve-backup
+echo 'UUID=<your-uuid> /mnt/pve-backup ext4 defaults,nofail,x-systemd.device-timeout=10s 0 2' >> /etc/fstab
+systemctl daemon-reload
+mount /mnt/pve-backup
+
+# 4. Register with PVE as a backup storage target
+pvesm add dir pve-backup --path /mnt/pve-backup --content backup,iso,vztmpl --is_mountpoint 1
+```
+
+`nofail` keeps PVE booting if the drive is unplugged. `--is_mountpoint 1` keeps PVE from writing into the placeholder directory if the drive isn't actually mounted.
+
+Then schedule a daily vzdump via Datacenter → Backup, and stack `setup-pve-etc-backup.sh` on top to cover the host's own config.
 
 ---
 
