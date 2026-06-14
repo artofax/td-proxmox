@@ -167,7 +167,20 @@ fi
 # build/runtime so we don't have to bring in a second Node installation.
 PI_NODE_BIN="$(pct exec "$TARGET_CTID" -- bash -lc 'ls -d /root/.local/share/pi-node/node-v*/bin 2>/dev/null | head -1' 2>/dev/null || true)"
 if [[ -z "$PI_NODE_BIN" ]]; then
-  warn "Couldn't find pi's Node install. Has setup-ollama-pi.sh been run? Continuing — will fall back to system node if available."
+  # Fall back to system node only if it actually exists. Without ANY node we
+  # can't build the cards UI — fail fast with a clear remediation rather than
+  # crashing later inside an npm-not-found error.
+  if pct exec "$TARGET_CTID" -- bash -lc 'command -v npm' >/dev/null 2>&1; then
+    warn "Couldn't find pi's Node install — falling back to system node."
+  else
+    die "No Node/npm available on $TARGET_HOSTNAME, and pi's Node isn't at /root/.local/share/pi-node/.
+  Cause:  setup-ollama-pi.sh hasn't finished on this CT (pi install drops Node at that path).
+  Fix:    Run setup-ollama-pi.sh first, then re-run this script:
+            ./automation/setup-ollama-pi.sh --ct-id $TARGET_CTID
+            ./addons/setup-pi-web-uis.sh --hostname $TARGET_HOSTNAME
+  If you don't want pi on this CT, install Node with apt before re-running:
+            pct exec $TARGET_CTID -- apt-get install -y nodejs npm"
+  fi
 fi
 
 # ----- 1. CARDS UI (VVander/pi-remote-web-ui) ------------------------------

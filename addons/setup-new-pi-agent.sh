@@ -318,6 +318,33 @@ run "'$SETUP_OLLAMA' ${OLLAMA_ARGS[*]}"
 #   - OUTBOUND trust: this agent's pubkey → sandbox/gitea/openwebui/homepage's
 #     authorized_keys
 
+# Sanity check: verify pi+Node actually landed before downstream addons try
+# to use them. The interactive ollama.com signin can be skipped or fail
+# (browser tab closed, network blip), in which case pi never installs and
+# setup-pi-web-uis.sh would crash much later with 'npm: command not found'.
+# Catch the gap here with a clear remediation message.
+if (( ! DRY_RUN )) && (( ! SKIP_WEB_UIS )); then
+  if ! pct exec "$CTID" -- bash -lc 'ls -d /root/.local/share/pi-node/node-v*/bin >/dev/null 2>&1'; then
+    warn "================================================================"
+    warn "setup-ollama-pi.sh finished but pi's Node ISN'T at"
+    warn "  /root/.local/share/pi-node/  inside CT $CTID ($HOSTNAME)."
+    warn "Most likely cause: the ollama.com signin step didn't complete, so"
+    warn "the model pull + pi install steps were skipped."
+    warn ""
+    warn "Re-run setup-ollama-pi.sh by hand to finish that pairing flow:"
+    warn "  $SETUP_OLLAMA --ct-id $CTID${MODEL:+ --model $MODEL}"
+    warn ""
+    warn "Then re-invoke this script (it'll skip the parts already done) or"
+    warn "just run the remaining addons:"
+    warn "  $SETUP_WEB_UIS --hostname $HOSTNAME"
+    if (( WITH_FILEBROWSER )); then
+      warn "  $SETUP_FB --target $HOSTNAME"
+    fi
+    warn "================================================================"
+    die "Aborting before downstream addons run — they need pi's Node."
+  fi
+fi
+
 # ----- bidirectional trust mesh with other pi agents -----------------------
 # setup-ollama-pi.sh seeds OUTBOUND trust to the standard "service" CTs
 # (sandbox/gitea/openwebui/homepage). It doesn't know about peer pi agents.
