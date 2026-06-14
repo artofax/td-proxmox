@@ -248,6 +248,23 @@ run "pct create $CTID '$TEMPLATE_REF' \
   --start 0"
 rm -f "$SSH_KEYS_TMP"
 
+# ----- TUN device passthrough (unprivileged LXC needs this for Tailscale) ---
+# An unprivileged LXC with --features nesting=1 still doesn't get /dev/net/tun
+# by default. Without that device, tailscaled fails to start (the daemon needs
+# TUN to create its tailscale0 interface). bootstrap-pve.sh adds the same two
+# lines to the original ollama-pi-agent's config; we do the same here.
+log "Adding /dev/net/tun passthrough to CT $CTID config..."
+CT_CONF="/etc/pve/lxc/$CTID.conf"
+if (( ! DRY_RUN )) && ! grep -q "/dev/net/tun" "$CT_CONF" 2>/dev/null; then
+  cat >> "$CT_CONF" <<'TUN_BLOCK'
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+TUN_BLOCK
+fi
+if (( DRY_RUN )); then
+  printf "[dry-run] would append to %s:\n  lxc.cgroup2.devices.allow: c 10:200 rwm\n  lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file\n" "$CT_CONF"
+fi
+
 run "pct start $CTID"
 
 log "Waiting for CT network to come up..."
