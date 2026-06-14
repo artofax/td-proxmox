@@ -20,6 +20,7 @@
 #   ./setup-ollama-pi.sh --model gemma3:12b-cloud # different default model
 #   ./setup-ollama-pi.sh --ct-id 200              # single CT (still installs pi if hostname matches a "with-pi" target)
 #   ./setup-ollama-pi.sh --ct-id 103 --skip-pi    # explicit single-CT, no pi
+#   ./setup-ollama-pi.sh --ct-id 103 --with-pi    # force pi install on a non-default hostname
 #   ./setup-ollama-pi.sh --skip-signin            # install Ollama, pair manually later
 #   ./setup-ollama-pi.sh --skip-pi                # never install pi (Ollama on all targets)
 #   ./setup-ollama-pi.sh --dry-run                # preview commands
@@ -32,6 +33,7 @@ MODEL=""
 PI_CTID=""
 SKIP_SIGNIN=0
 SKIP_PI=0
+WITH_PI=0
 DRY_RUN=0
 
 # Built-in targets. Format: "hostname:mode" where mode is with-pi or no-pi.
@@ -61,6 +63,7 @@ while [[ $# -gt 0 ]]; do
     --model)       MODEL="$2"; shift 2 ;;
     --skip-signin) SKIP_SIGNIN=1; shift ;;
     --skip-pi)     SKIP_PI=1; shift ;;
+    --with-pi)     WITH_PI=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
     -h|--help)     sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -304,12 +307,26 @@ if [[ -n "$PI_CTID" ]]; then
     || die "CT $PI_CTID is not running."
   hn="$(get_hostname_for_ctid "$PI_CTID")"
   mode="no-pi"
-  # If the explicit CT happens to match a built-in "with-pi" target and
-  # --skip-pi isn't set, install pi too.
-  for entry in "${DEFAULT_TARGETS[@]}"; do
-    IFS=':' read -r dh dmode <<< "$entry"
-    if [[ "$dh" == "$hn" ]]; then mode="$dmode"; break; fi
-  done
+  # Decide with-pi vs no-pi in this order:
+  #   1. --with-pi flag explicitly forces it (overrides everything below)
+  #   2. Hostname matches a built-in "with-pi" target (ollama-pi-agent)
+  #   3. Hostname looks like a pi agent (any *pi-agent* — covers pi-agent-2,
+  #      pi-agent-3, ... created by setup-new-pi-agent.sh, and any custom
+  #      name with 'pi-agent' in it)
+  #   4. Otherwise: no-pi (just Ollama, like the openwebui CT)
+  if (( WITH_PI )); then
+    mode="with-pi"
+  else
+    for entry in "${DEFAULT_TARGETS[@]}"; do
+      IFS=':' read -r dh dmode <<< "$entry"
+      if [[ "$dh" == "$hn" ]]; then mode="$dmode"; break; fi
+    done
+    # Auto-detect pi-style hostnames if not already matched. Pattern is
+    # intentionally loose: anything with 'pi-agent' in the name gets pi.
+    if [[ "$mode" == "no-pi" && "$hn" == *pi-agent* ]]; then
+      mode="with-pi"
+    fi
+  fi
   TARGETS=("$hn:$mode")
 else
   TARGETS=("${DEFAULT_TARGETS[@]}")

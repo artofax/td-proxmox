@@ -307,7 +307,7 @@ log "Delegating to setup-ollama-pi.sh for Ollama + pi install..."
 log "  You'll see a 'ollama signin' URL — open it in a browser, click Connect."
 log "================================================================"
 
-OLLAMA_ARGS=(--ct-id "$CTID")
+OLLAMA_ARGS=(--ct-id "$CTID" --with-pi)
 [[ -n "$MODEL" ]] && OLLAMA_ARGS+=(--model "$MODEL")
 run "'$SETUP_OLLAMA' ${OLLAMA_ARGS[*]}"
 
