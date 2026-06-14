@@ -17,6 +17,7 @@ For pi (or you, writing scripts that pi runs) registering tiles on the Homepage 
 | [`setup-port80-redirect.sh`](setup-port80-redirect.sh) | Kernel-level NAT redirect so `http://gitea`, `http://openwebui`, `http://homepage` work without typing `:3000` / `:8080` | `gitea`, `openwebui`, `homepage` | ~1 min |
 | [`setup-pve-etc-backup.sh`](setup-pve-etc-backup.sh) | Daily systemd timer that snapshots `/etc/pve` + host network/SSH/apt config to your backup drive (vzdump doesn't cover these) | PVE host | <1 min |
 | [`setup-vzdump-schedule.sh`](setup-vzdump-schedule.sh) | Idempotent vzdump job in `/etc/pve/jobs.cfg` — nightly CT backups to your backup drive with sensible retention | PVE host | <1 min |
+| [`setup-new-pi-agent.sh`](setup-new-pi-agent.sh) | Stand up an additional `ollama-pi-agent`-style CT from scratch — pct create + Tailscale + Ollama + pi + bidirectional SSH trust mesh + web UIs + Homepage tile | new CT (auto-named `pi-agent-N`) | ~10 min |
 
 ---
 
@@ -368,6 +369,76 @@ pct destroy 999 --purge
 ```
 
 Untested backups are wishes, not backups.
+
+---
+
+## `setup-new-pi-agent.sh`
+
+Stand up an additional `ollama-pi-agent`-style CT from scratch. The first one was created by `bootstrap-pve.sh` as part of the homelab build; this addon lets you spin up more later (a research agent, a sandbox agent, a per-project agent) without re-running the whole bootstrap.
+
+End state per invocation: a new Debian 12 LXC named `pi-agent-N` (auto-numbered) joined to Tailscale, with Ollama + pi installed, browser UIs on 9090/9091/9092, bidirectional SSH trust with every other existing CT, and a Homepage tile under the AI group.
+
+**Default behavior** (no flags):
+
+1. Auto-pick the next available `pi-agent-N` hostname (`pi-agent-2`, `pi-agent-3`, ...)
+2. Auto-allocate the next CTID via `pvesh get /cluster/nextid`
+3. Create a CT with the same resources as the original `ollama-pi-agent`: 4 CPU / 4 GB RAM / 20 GB disk, unprivileged, `nesting=1`
+4. Install Tailscale and join the tailnet under the new hostname
+5. Push the PVE host's workstation `authorized_keys` so you can `ssh root@<new-hostname>` from your laptop immediately
+6. Delegate to `setup-ollama-pi.sh --ct-id <new>` for Ollama install, ollama.com signin (one browser click), model pull, and pi install
+7. Wire the bidirectional SSH trust mesh — new agent's pubkey lands in every other pi agent's `authorized_keys`, and every other pi agent's pubkey lands in the new one's, plus `ssh-keyscan` pre-seeds `known_hosts` both directions so first SSHes don't prompt
+8. Delegate to `setup-pi-web-uis.sh --hostname <new>` for the cards/term/shell UIs (per-target Homepage markers added so multiple agents coexist on the dashboard)
+9. Register a "machine" tile on Homepage in the AI group, linking to the agent
+
+**Prereqs:**
+
+- TD-Proxmox homelab already built (`bootstrap-pve.sh` finished — at minimum the original `ollama-pi-agent` exists, since this is the trust-mesh anchor)
+- A workstation SSH key in PVE's `/root/.ssh/authorized_keys` (same source bootstrap-pve.sh uses)
+- A Tailscale auth key from <https://login.tailscale.com/admin/settings/keys> (prompted if `--ts-authkey` not given)
+- The td-proxmox repo cloned on the PVE host (the script delegates to sibling scripts at `../automation/setup-ollama-pi.sh` and `./setup-pi-web-uis.sh`)
+
+**Install:**
+
+```bash
+# On the PVE host, inside your td-proxmox clone
+./addons/setup-new-pi-agent.sh                              # auto everything
+./addons/setup-new-pi-agent.sh --hostname pi-agent-research # explicit name
+./addons/setup-new-pi-agent.sh --hostname pi-agent-fast \
+    --cpu 8 --ram 8192 --disk 40 \
+    --model gemma3:12b-cloud                                # bigger box, lighter model
+./addons/setup-new-pi-agent.sh --with-filebrowser           # plus filebrowser on 8080
+./addons/setup-new-pi-agent.sh --skip-web-uis --skip-homepage-tile  # bare Ollama+pi only
+```
+
+**Flags:**
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--hostname NAME` | `pi-agent-N` (auto) | Explicit hostname |
+| `--ctid N` | auto via `pvesh` | Explicit CTID |
+| `--cpu N` | `4` | CPU cores |
+| `--ram MB` | `4096` | Memory (MB) |
+| `--disk GB` | `20` | Root disk (GB) |
+| `--model NAME` | setup-ollama-pi default | Ollama model to pull |
+| `--ts-authkey KEY` | (prompt) | Skip the Tailscale auth-key prompt |
+| `--ct-password PW` | (prompt) | Skip the CT root password prompt |
+| `--skip-web-uis` | — | Don't install cards/term/shell (and don't register their Homepage tiles) |
+| `--with-filebrowser` | — | Also install filebrowser at port 8080 |
+| `--skip-trust-mesh` | — | Don't wire SSH trust to/from existing CTs |
+| `--skip-homepage-tile` | — | Don't register the agent's machine tile (UI tiles still register unless `--skip-web-uis`) |
+| `--dry-run` | — | Print every command without executing |
+
+**SSH trust mesh details:** the script scans for existing pi-style CTs (`ollama-pi-agent`, `pi-agent-2`, `pi-agent-3`, ... up to `pi-agent-9`) and for each one it finds:
+
+1. Appends the new agent's `id_ed25519.pub` to the peer's `/root/.ssh/authorized_keys`
+2. Appends the peer's `id_ed25519.pub` to the new agent's `/root/.ssh/authorized_keys`
+3. Runs `ssh-keyscan` in both directions to pre-trust host keys
+
+End state: any pi can `ssh root@<other-pi>` without password or fingerprint prompts. This is on top of the "outbound only" trust mesh `setup-ollama-pi.sh` already seeds to the service CTs (`sandbox`/`gitea`/`openwebui`/`homepage`).
+
+**Homepage layout with multiple agents:** each pi agent's three browser UIs land in their own group, e.g. `Pi (ollama-pi-agent)` with Cards/Terminal/Shell inside, and `Pi (pi-agent-2)` with its own Cards/Terminal/Shell. The marker is `pi-web-uis-<hostname>` per agent so re-runs only touch the relevant block. Plus one "machine" tile per agent in the AI group (marker `pi-agent-machine-<hostname>`).
+
+**Idempotent at the addon-script level**, not at the CT level. If you re-run with the same `--hostname`, the script aborts because that CT already exists. To update an existing agent's config, run the relevant sub-addon directly: `setup-ollama-pi.sh --ct-id <N>` for re-install, `setup-pi-web-uis.sh --hostname <h>` for UI changes. The Homepage tile registration *is* marker-idempotent — re-registering replaces the existing block rather than appending a duplicate.
 
 ---
 

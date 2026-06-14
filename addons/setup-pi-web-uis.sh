@@ -408,10 +408,12 @@ selected shell    && install_shell_ui
 # in this run (respects --only cards / --only terminal / --only shell).
 {
   TILE_BLOCK=""
+  # Group header includes the hostname so multiple agents render as distinct
+  # sections on the Homepage dashboard instead of merging under a single "Pi"
+  # group with ambiguous tile names.
   _append_tile() {
-    # First tile sets up the "- Pi:" group header, subsequent tiles indent.
     if [[ -z "$TILE_BLOCK" ]]; then
-      TILE_BLOCK="- Pi:
+      TILE_BLOCK="- Pi ($TARGET_HOSTNAME):
 $1"
     else
       TILE_BLOCK="$TILE_BLOCK
@@ -420,26 +422,28 @@ $1"
   }
 
   if selected cards; then
-    _append_tile "    - Pi (Cards):
+    _append_tile "    - Cards:
         href: http://$TARGET_HOSTNAME:$CARDS_PORT
         description: pi agent — tool cards + thinking blocks
         icon: mdi-cards"
   fi
   if selected terminal; then
-    _append_tile "    - Pi (Terminal):
+    _append_tile "    - Terminal:
         href: http://$TARGET_HOSTNAME:$TERM_PORT
         description: pi in a browser terminal
         icon: mdi-console"
   fi
   if selected shell; then
-    _append_tile "    - Pi (Shell):
+    _append_tile "    - Shell:
         href: http://$TARGET_HOSTNAME:$SHELL_PORT
-        description: plain bash at /root on ollama-pi-agent
+        description: plain bash at /root on $TARGET_HOSTNAME
         icon: mdi-terminal"
   fi
 
   if [[ -n "$TILE_BLOCK" ]]; then
-    add_homepage_tile "pi-web-uis" "$TILE_BLOCK"
+    # Per-target marker so multiple pi agents each get their own tile block
+    # rather than the second install overwriting the first.
+    add_homepage_tile "pi-web-uis-$TARGET_HOSTNAME" "$TILE_BLOCK"
   fi
 }
 
