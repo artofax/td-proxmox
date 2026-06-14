@@ -23,6 +23,9 @@
 #      via setup-pi-web-uis.sh.
 #   8. Homepage tiles for the three UIs (per-target marker so multiple agents
 #      coexist on the dashboard).
+#   9. SMB share of /root (port 445) so you can mount the agent's home
+#      directory from macOS Finder / Windows Explorer / Linux. SMB auth uses
+#      the CT root password ('root' SMB user maps to root on disk).
 #
 # Usage:
 #   ./setup-new-pi-agent.sh                                  # auto-hostname (pi-agent-N), all defaults
@@ -45,6 +48,7 @@
 #   --skip-trust-mesh     Don't wire SSH trust to/from existing CTs (manual setup later)
 #   --skip-homepage-tile  Don't register the agent's "machine" tile on Homepage
 #                         (the web-UIs tile is still registered if --skip-web-uis isn't set)
+#   --skip-smb-share      Don't install Samba / expose /root via SMB
 #   --dry-run             Preview every command without executing
 #
 # Prereqs: a TD-Proxmox homelab built by bootstrap-pve.sh — at minimum, the
@@ -66,6 +70,7 @@ SKIP_WEB_UIS=0
 WITH_FILEBROWSER=0
 SKIP_TRUST_MESH=0
 SKIP_HOMEPAGE_TILE=0
+SKIP_SMB_SHARE=0
 DRY_RUN=0
 
 # ----- parse args ------------------------------------------------------------
@@ -82,6 +87,7 @@ while [[ $# -gt 0 ]]; do
     --skip-web-uis)       SKIP_WEB_UIS=1; shift ;;
     --with-filebrowser)   WITH_FILEBROWSER=1; shift ;;
     --skip-trust-mesh)    SKIP_TRUST_MESH=1; shift ;;
+    --skip-smb-share)     SKIP_SMB_SHARE=1; shift ;;
     --skip-homepage-tile) SKIP_HOMEPAGE_TILE=1; shift ;;
     --dry-run)            DRY_RUN=1; shift ;;
     -h|--help)            sed -n '2,55p' "$0"; exit 0 ;;
@@ -116,10 +122,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_OLLAMA="$SCRIPT_DIR/../automation/setup-ollama-pi.sh"
 SETUP_WEB_UIS="$SCRIPT_DIR/setup-pi-web-uis.sh"
 SETUP_FB="$SCRIPT_DIR/setup-filebrowser.sh"
+SETUP_SMB="$SCRIPT_DIR/setup-smb-share.sh"
 
 [[ -x "$SETUP_OLLAMA" ]] || die "setup-ollama-pi.sh not found at $SETUP_OLLAMA. Run this from a clone of the td-proxmox repo."
 [[ -x "$SETUP_WEB_UIS" ]] || warn "setup-pi-web-uis.sh not found — --skip-web-uis will be forced."
 (( ! SKIP_WEB_UIS )) && [[ ! -x "$SETUP_WEB_UIS" ]] && SKIP_WEB_UIS=1
+[[ -x "$SETUP_SMB" ]] || warn "setup-smb-share.sh not found — --skip-smb-share will be forced."
+(( ! SKIP_SMB_SHARE )) && [[ ! -x "$SETUP_SMB" ]] && SKIP_SMB_SHARE=1
 
 # ----- determine hostname (auto-number if not given) ------------------------
 if [[ -z "$HOSTNAME" ]]; then
@@ -224,6 +233,7 @@ log "  Workstation key: ${SSH_KEY:0:50}..."
 log "  Trust mesh:      $((( SKIP_TRUST_MESH )) && echo skipped || echo bidirectional with existing CTs)"
 log "  Web UIs:         $((( SKIP_WEB_UIS )) && echo skipped || echo cards/term/shell on 9090/9091/9092)"
 log "  Filebrowser:     $((( WITH_FILEBROWSER )) && echo yes || echo no)"
+log "  SMB share:       $((( SKIP_SMB_SHARE )) && echo skipped || echo /root over smb://$HOSTNAME/home)"
 log "  Homepage tile:   $((( SKIP_HOMEPAGE_TILE )) && echo skipped || echo registered)"
 log "================================================================"
 
@@ -422,6 +432,18 @@ if (( WITH_FILEBROWSER )) && [[ -x "$SETUP_FB" ]]; then
   run "'$SETUP_FB' --target '$HOSTNAME'"
 fi
 
+# ----- SMB share on /root -------------------------------------------------
+# Default ON for new pi agents so you can mount the agent's home directory
+# from your laptop's Finder / Explorer without scp / sftp. SMB auth uses
+# the CT root password the user already provided above, mapped to the
+# Samba 'root' user. --skip-smb-share opts out.
+if (( ! SKIP_SMB_SHARE )); then
+  log "================================================================"
+  log "Delegating to setup-smb-share.sh for SMB share on /root..."
+  log "================================================================"
+  run "'$SETUP_SMB' --target '$HOSTNAME' --password '$CT_PASSWORD'"
+fi
+
 # ----- Homepage tile for the agent itself (the "machine" tile) -------------
 # This is separate from the per-UI tiles that setup-pi-web-uis.sh registers.
 # This tile names the agent and links to its SSH endpoint; useful when you
@@ -479,6 +501,9 @@ log "  Plain shell: http://$HOSTNAME:9092"
 fi
 if (( WITH_FILEBROWSER )); then
 log "  Files:       http://$HOSTNAME:8080"
+fi
+if (( ! SKIP_SMB_SHARE )); then
+log "  SMB share:   smb://$HOSTNAME/home  (user: root, password: the CT root password you provided)"
 fi
 if (( ! SKIP_HOMEPAGE_TILE )); then
 log "  Homepage:    http://homepage (look for the '$HOSTNAME' tile in the AI group)"

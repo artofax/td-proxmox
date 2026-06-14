@@ -17,7 +17,8 @@ For pi (or you, writing scripts that pi runs) registering tiles on the Homepage 
 | [`setup-port80-redirect.sh`](setup-port80-redirect.sh) | Kernel-level NAT redirect so `http://gitea`, `http://openwebui`, `http://homepage` work without typing `:3000` / `:8080` | `gitea`, `openwebui`, `homepage` | ~1 min |
 | [`setup-pve-etc-backup.sh`](setup-pve-etc-backup.sh) | Daily systemd timer that snapshots `/etc/pve` + host network/SSH/apt config to your backup drive (vzdump doesn't cover these) | PVE host | <1 min |
 | [`setup-vzdump-schedule.sh`](setup-vzdump-schedule.sh) | Idempotent vzdump job in `/etc/pve/jobs.cfg` — nightly CT backups to your backup drive with sensible retention | PVE host | <1 min |
-| [`setup-new-pi-agent.sh`](setup-new-pi-agent.sh) | Stand up an additional `ollama-pi-agent`-style CT from scratch — pct create + Tailscale + Ollama + pi + bidirectional SSH trust mesh + web UIs + Homepage tile | new CT (auto-named `pi-agent-N`) | ~10 min |
+| [`setup-new-pi-agent.sh`](setup-new-pi-agent.sh) | Stand up an additional `ollama-pi-agent`-style CT from scratch — pct create + Tailscale + Ollama + pi + bidirectional SSH trust mesh + web UIs + SMB share + Homepage tile | new CT (auto-named `pi-agent-N`) | ~10 min |
+| [`setup-smb-share.sh`](setup-smb-share.sh) | Expose `/root` on a pi agent over SMB so you can mount the agent's home directory from macOS Finder / Windows Explorer / Linux | `ollama-pi-agent` (default), any pi-agent | ~2 min |
 
 ---
 
@@ -439,6 +440,77 @@ End state: any pi can `ssh root@<other-pi>` without password or fingerprint prom
 **Homepage layout with multiple agents:** each pi agent's three browser UIs land in their own group, e.g. `Pi (ollama-pi-agent)` with Cards/Terminal/Shell inside, and `Pi (pi-agent-2)` with its own Cards/Terminal/Shell. The marker is `pi-web-uis-<hostname>` per agent so re-runs only touch the relevant block. Plus one "machine" tile per agent in the AI group (marker `pi-agent-machine-<hostname>`).
 
 **Idempotent at the addon-script level**, not at the CT level. If you re-run with the same `--hostname`, the script aborts because that CT already exists. To update an existing agent's config, run the relevant sub-addon directly: `setup-ollama-pi.sh --ct-id <N>` for re-install, `setup-pi-web-uis.sh --hostname <h>` for UI changes. The Homepage tile registration *is* marker-idempotent — re-registering replaces the existing block rather than appending a duplicate.
+
+---
+
+## `setup-smb-share.sh`
+
+Exposes a pi agent's `/root` over SMB so you can mount the agent's home directory from your laptop's Finder (macOS), File Explorer (Windows), or `gio mount` / `mount.cifs` (Linux). Eliminates the scp / sftp / rsync friction when you want to edit pi's configs, drop files in, or browse what pi has produced.
+
+Auto-installed by `setup-new-pi-agent.sh` for every new agent (opt out with `--skip-smb-share`). For the original `ollama-pi-agent` from `bootstrap-pve.sh`, run this addon once manually as a post-bootstrap step.
+
+**Config:**
+
+- Single share named `home` exposing `/root` (everything — including `.ssh/`, `.local/share/pi-node/`, `.ollama/`, `uploads/`, anything else)
+- Auth: Samba user `root` with a password. Files on disk remain owned by `root` at the filesystem layer regardless of which client mounts the share.
+- Bind: `smbd` listens on all interfaces, so the share is reachable from both Tailscale (`smb://ollama-pi-agent/home`) and your local LAN (`smb://<lan-ip>/home`).
+- macOS Finder compatibility: `vfs objects = catia fruit streams_xattr` plus `fruit:metadata = stream` etc., so `.DS_Store` and resource forks don't pollute the filesystem and extended attributes round-trip correctly.
+
+**Mount instructions per platform:**
+
+| Platform | How |
+|---|---|
+| macOS | Finder → `Cmd-K` → `smb://ollama-pi-agent/home` → connect as `root` |
+| Windows | Run → `\\ollama-pi-agent\home` → username `root` |
+| Linux (gvfs) | `gio mount smb://ollama-pi-agent/home` |
+| Linux (cifs) | `mount.cifs //ollama-pi-agent/home /mnt/foo -o username=root` |
+
+**Install (for the original `ollama-pi-agent`, post-bootstrap):**
+
+```bash
+# On the PVE host
+curl -fsSL https://raw.githubusercontent.com/artofax/td-proxmox/main/addons/setup-smb-share.sh \
+  -o /root/setup-smb-share.sh
+chmod +x /root/setup-smb-share.sh
+/root/setup-smb-share.sh
+```
+
+Prompts for an SMB password (twice for confirmation; minimum 6 chars). For convenience, use the same password as your CT root password so you only have one credential to remember. Files land on disk with their root ownership preserved.
+
+**Flags:**
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--target NAME` | `ollama-pi-agent` | Hostname to install on (repeatable) |
+| `--hostname NAME` | — | Back-compat alias for `--target` |
+| `--ct-id N` | (hostname lookup) | Target a CT by ID (only valid with one `--target`) |
+| `--share-name NAME` | `home` | SMB share name (mount path: `smb://host/<name>`) |
+| `--share-path PATH` | `/root` | Filesystem path the share exposes |
+| `--password PW` | (prompt) | Skip the password prompt |
+| `--workgroup NAME` | `WORKGROUP` | SMB workgroup |
+| `--dry-run` | — | Preview without executing |
+
+**Auto-installed by `setup-new-pi-agent.sh`:** when you spin up a new agent, the script reuses the CT root password you already entered as the SMB password (so the new agent's `smb://pi-agent-2/home` mount works with the same password the script just set). Pass `--skip-smb-share` to opt out.
+
+**Idempotent.** Re-running detects the existing config (managed via `# TD-SMB-SHARE: <name> START/END` markers in `/etc/samba/smb.conf`), strips the old block, and writes a fresh one. Resets the SMB password too. Safe to invoke whenever you want to rotate credentials or change the share path.
+
+**Verify after install:**
+
+```bash
+# From PVE host
+pct exec $(pct list | awk '/ollama-pi-agent/ {print $1}') -- smbstatus --shares
+# Should list 'home' as available
+
+# From a tailnet device — macOS smoke test
+smbutil view -g //root@ollama-pi-agent
+# Prompts for password, then lists [home]
+```
+
+**Security notes:**
+
+- Anyone on your tailnet (or LAN) can attempt to mount with the SMB password — Tailscale ACLs don't filter port 445 traffic. If you have untrusted devices on your tailnet, consider running `setup-port80-redirect.sh`-style iptables rules to gate `tcp/445` to specific tailnet IPs.
+- The SMB user is named `root` but the password is independent of the Linux root password. Changing one doesn't change the other.
+- For higher security, switch to a dedicated `pi` SMB user — but you'll need to align Samba's `valid users` and `force user` directives. Edit the script's heredoc directly if you want this shape.
 
 ---
 
