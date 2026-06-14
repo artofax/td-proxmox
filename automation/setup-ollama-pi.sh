@@ -5,7 +5,7 @@
 # Default behavior (no flags): walks the built-in target list, currently
 #   ollama-pi-agent   → install/verify Ollama, signin, pull model, install pi,
 #                       generate /root/.ssh/id_ed25519, push pubkey into
-#                       sandbox/gitea/openwebui/homepage so pi can ssh into
+#                       sandbox (or docker)/gitea/openwebui/homepage so pi can ssh into
 #                       any of them passwordless
 #   openwebui         → install/verify Ollama, signin, pull model (no pi)
 # Idempotent at every step — re-runs only do work that isn't already done.
@@ -45,7 +45,14 @@ DEFAULT_TARGETS=(
 # password. The script generates a keypair on the pi host, drops the pubkey
 # into each target's /root/.ssh/authorized_keys, and pre-trusts each target's
 # host key so the first connection doesn't prompt.
-SSH_TRUST_TARGETS=(sandbox gitea openwebui homepage)
+#
+# 'sandbox' and 'docker' are both listed because the Docker host CT was
+# renamed from 'docker' to 'sandbox' to avoid the prompt-clash issue ('run
+# a docker on docker'). On a freshly bootstrapped homelab only 'sandbox'
+# exists; on a transitional homelab where the rename hasn't been done yet,
+# only 'docker' exists. Including both means trust gets seeded to whichever
+# is actually there — missing CTs are skipped silently below.
+SSH_TRUST_TARGETS=(sandbox docker gitea openwebui homepage)
 
 # ----- parse args ------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
