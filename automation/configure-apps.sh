@@ -357,41 +357,66 @@ configure_gitea() {
         --config $GITEA_CONFIG || echo '  (user may already exist)'\""
 
   # Mint an access token with full scope.
-  # Gitea refuses to create a duplicate token by name (it returns an error
-  # and exits non-zero), so on a re-run we always delete the existing
-  # 'pi-agent' token first. delete-access-token is harmless if no token
-  # with that name exists (just prints an error and returns non-zero, which
-  # we swallow). Net effect: every run produces a fresh, working token.
-  log "  Minting access token (name: pi-agent)..."
+  #
+  # We use Gitea's REST API rather than the `gitea admin user ...` CLI here
+  # because the CLI's token-management surface keeps changing across versions
+  # (Gitea 1.26 removed --username from delete-access-token and
+  # list-access-tokens, breaking the prior implementation). The API has
+  # been stable since 1.18:
+  #
+  #   DELETE /api/v1/users/{user}/tokens/{name}   → idempotent delete
+  #   POST   /api/v1/users/{user}/tokens          → mint, returns sha1
+  #
+  # Both endpoints accept basic auth as the target user. We have
+  # $ADMIN_PASSWORD already.
+  log "  Minting access token (name: pi-agent) via REST API..."
   GITEA_TOKEN=""
   if (( ! DRY_RUN )); then
-    # Delete any existing token with this name first. Without this, re-runs
-    # silently produce an empty $GITEA_TOKEN, which then propagates into
-    # services.yaml as the literal placeholder 'REPLACE_WITH_GITEA_TOKEN'
-    # and breaks the Homepage Gitea widget.
-    pct exec "$GITEA_CTID" -- bash -lc "sudo -u $GITEA_USER gitea admin user delete-access-token \
-        --username '$ADMIN_USER' \
-        --token-name 'pi-agent' \
-        --config $GITEA_CONFIG" >/dev/null 2>&1 || true
+    local api="http://${GITEA_IP}:3000/api/v1/users/${ADMIN_USER}/tokens"
 
-    # Now mint fresh. Gitea's success message is one of:
-    #   "Access token was successfully created: <hex>"   (newer versions)
-    #   "Access token: <hex>"                            (older versions)
-    # Both have the token as the last field, so use $NF rather than splitting
-    # on ': ' (which broke for the newer format — $2 = "was successfully created").
-    GITEA_TOKEN="$(pct exec "$GITEA_CTID" -- bash -lc "sudo -u $GITEA_USER gitea admin user generate-access-token \
-        --username '$ADMIN_USER' \
-        --token-name 'pi-agent' \
-        --scopes 'all' \
-        --config $GITEA_CONFIG 2>/dev/null | awk '/^Access token/{print \$NF}'" || true)"
+    # Step 1: delete any existing token with our name. 204 = deleted,
+    # 404 = wasn't there. Either is fine; we just need it gone.
+    local del_status
+    del_status=$(curl -s -o /dev/null -w "%{http_code}" \
+      -u "${ADMIN_USER}:${ADMIN_PASSWORD}" \
+      -X DELETE "${api}/pi-agent")
+    case "$del_status" in
+      204) log "    Deleted existing pi-agent token." ;;
+      404) log "    No prior pi-agent token to delete." ;;
+      *)   warn "    Unexpected HTTP $del_status when deleting old token (continuing anyway)." ;;
+    esac
+
+    # Step 2: mint fresh. POST returns the sha1 in the JSON body. We don't
+    # require jq — a small grep extracts the field.
+    local mint_resp
+    mint_resp=$(curl -s \
+      -u "${ADMIN_USER}:${ADMIN_PASSWORD}" \
+      -X POST "${api}" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"pi-agent","scopes":["all"]}')
+
+    GITEA_TOKEN=$(printf '%s' "$mint_resp" | grep -oE '"sha1":"[^"]+"' | head -1 | cut -d'"' -f4)
+
+    # Step 3: validate the token actually works against the API. Catches
+    # the case where mint returned 201 with a malformed token, or where
+    # something else is off in the auth chain.
+    if [[ -n "$GITEA_TOKEN" ]]; then
+      local val_status
+      val_status=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "Authorization: token $GITEA_TOKEN" \
+        "http://${GITEA_IP}:3000/api/v1/user")
+      if [[ "$val_status" != "200" ]]; then
+        warn "    Token minted but API validation returned HTTP $val_status — token may be unusable."
+        GITEA_TOKEN=""
+      else
+        log "    Token validated (200 from /api/v1/user)."
+      fi
+    fi
 
     if [[ -z "$GITEA_TOKEN" ]]; then
-      # If delete + remint both failed, something more fundamental is broken.
-      # Fall back to listing existing tokens so the user can see what's there.
-      warn "  Token mint returned empty even after deleting old token."
-      warn "  Existing tokens for $ADMIN_USER:"
-      pct exec "$GITEA_CTID" -- bash -lc "sudo -u $GITEA_USER gitea admin user list-access-tokens \
-          --username '$ADMIN_USER' --config $GITEA_CONFIG 2>&1" | sed 's/^/    /' >&2 || true
+      warn "  Token mint via API returned empty / invalid token."
+      warn "  Raw response from Gitea was:"
+      printf '    %s\n' "$mint_resp" >&2
       warn "  Homepage Gitea widget will fall back to placeholder key — fix manually:"
       warn "    1) Generate a token in Gitea UI → http://$GITEA_IP:3000/-/user/settings/applications"
       warn "    2) sed -i 's|key: REPLACE_WITH_GITEA_TOKEN|key: <your-token>|' <homepage-services.yaml>"
