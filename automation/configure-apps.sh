@@ -874,12 +874,30 @@ DROPIN
 configure_filebrowser() {
   log "Configuring filebrowser..."
 
-  # Locate the addon. configure-apps.sh lives in automation/; the addon is
-  # in addons/. SCRIPT_DIR is set early in the script.
+  # Locate the addon. Two paths:
+  #   1. If configure-apps.sh is in a clone of the repo, the sibling addons/
+  #      directory has setup-filebrowser.sh next to it.
+  #   2. If configure-apps.sh was curl'd as a standalone file (no repo clone),
+  #      ../addons/ won't exist. Fall back to fetching from GitHub. This keeps
+  #      the "curl just this one file" install path complete.
   local SETUP_FB="$SCRIPT_DIR/../addons/setup-filebrowser.sh"
   if [[ ! -x "$SETUP_FB" ]]; then
-    warn "  setup-filebrowser.sh not found at $SETUP_FB — skipping. (Are you running from a clone of the repo?)"
-    return
+    log "  Local sibling addon not found ($SETUP_FB)."
+    log "  Fetching from GitHub..."
+    local FB_URL="https://raw.githubusercontent.com/artofax/td-proxmox/main/addons/setup-filebrowser.sh"
+    SETUP_FB="/tmp/setup-filebrowser-$$.sh"
+    if curl -fsSL "$FB_URL" -o "$SETUP_FB" 2>/dev/null && [[ -s "$SETUP_FB" ]]; then
+      chmod +x "$SETUP_FB"
+      log "    Fetched to $SETUP_FB"
+    else
+      warn "  Couldn't fetch setup-filebrowser.sh from GitHub."
+      warn "  Skipping filebrowser install. The Tools tiles in services.yaml will"
+      warn "  point at filebrowser instances that don't exist yet. To install manually:"
+      warn "    curl -fsSL $FB_URL -o /root/setup-filebrowser.sh"
+      warn "    chmod +x /root/setup-filebrowser.sh"
+      warn "    /root/setup-filebrowser.sh --admin-user $ADMIN_USER --admin-password '<12+ char pass>' --skip-homepage-tile"
+      return
+    fi
   fi
 
   # Determine which targets to install on. The addon defaults to
