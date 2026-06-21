@@ -33,6 +33,8 @@
 #   --port <n>         Listen port inside each CT (default: 8080)
 #   --admin-user NAME  Filebrowser admin username (shared across all targets)
 #   --admin-password P Filebrowser admin password (shared across all targets)
+#   --skip-homepage-tile  Don't register a Homepage tile (used by configure-apps.sh
+#                         which manages services.yaml authoritatively)
 #   --dry-run          Preview commands
 
 set -Eeuo pipefail
@@ -44,6 +46,7 @@ FB_ROOT="/root/uploads"
 FB_PORT=8080
 ADMIN_USER=""
 ADMIN_PASSWORD=""
+SKIP_HOMEPAGE_TILE=0
 DRY_RUN=0
 
 # ----- parse args ------------------------------------------------------------
@@ -55,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     --port)              FB_PORT="$2"; shift 2 ;;
     --admin-user)        ADMIN_USER="$2"; shift 2 ;;
     --admin-password)    ADMIN_PASSWORD="$2"; shift 2 ;;
+    --skip-homepage-tile) SKIP_HOMEPAGE_TILE=1; shift ;;
     --dry-run)           DRY_RUN=1; shift ;;
     -h|--help)           sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -285,7 +289,13 @@ UNIT'"
         href: http://$target_hostname:$FB_PORT
         description: $tile_description
         icon: filebrowser.png"
-  add_homepage_tile "filebrowser-$target_hostname" "$fb_tile"
+  # configure-apps.sh's configure_filebrowser embeds the tile inline in
+  # services.yaml authoritatively and passes --skip-homepage-tile so this
+  # marker-based registration doesn't duplicate it. Standalone runs (no
+  # flag) still register normally.
+  if (( ! SKIP_HOMEPAGE_TILE )); then
+    add_homepage_tile "filebrowser-$target_hostname" "$fb_tile"
+  fi
 }
 
 # ----- resolve every target's CTID before doing any installs ----------------

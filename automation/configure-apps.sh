@@ -677,17 +677,51 @@ configure_homepage() {
         description: pi coding agent runtime (ssh root@ollama-pi-agent)
         icon: ollama.png"
 
+  # Resolve the sandbox hostname once (could be 'sandbox' or 'docker' for
+  # users mid-rename). Both the Sandbox group tile AND the filebrowser tile
+  # below need it.
+  local SANDBOX_HOSTNAME=""
   if [[ -n "$SANDBOX_CTID" ]]; then
-    # Resolve the sandbox hostname for the description (could be sandbox or docker)
-    local SANDBOX_HOSTNAME
     SANDBOX_HOSTNAME="$(pct config "$SANDBOX_CTID" 2>/dev/null | awk '/^hostname:/ {print $2}')"
     : "${SANDBOX_HOSTNAME:=sandbox}"
+  fi
+
+  if [[ -n "$SANDBOX_CTID" ]]; then
     SERVICES_YAML+="
 
 - Sandbox:
     - Docker:
         description: Docker host for ad-hoc deployments (ssh root@$SANDBOX_HOSTNAME)
         icon: docker.png"
+  fi
+
+  # ---- Tools group: filebrowser instances --------------------------------
+  # We embed filebrowser tiles inline in the authoritative services.yaml
+  # rather than depending on setup-filebrowser.sh's marker-based addon
+  # registration. configure_filebrowser passes --skip-homepage-tile so the
+  # addon doesn't double-register. Net effect: a single Tools section in
+  # services.yaml, owned by this script.
+  if (( ! SKIP_FILEBROWSER )); then
+    local TOOLS_TILES=""
+    if [[ -n "$PI_HOST_CTID" ]]; then
+      TOOLS_TILES+="
+    - Files on ollama-pi-agent:
+        href: http://ollama-pi-agent:8080
+        description: Drop files for pi to use (/root/uploads/)
+        icon: filebrowser.png"
+    fi
+    if [[ -n "$SANDBOX_CTID" ]]; then
+      TOOLS_TILES+="
+    - Files on $SANDBOX_HOSTNAME:
+        href: http://$SANDBOX_HOSTNAME:8080
+        description: Drop files for Docker workloads (/root/uploads/)
+        icon: filebrowser.png"
+    fi
+    if [[ -n "$TOOLS_TILES" ]]; then
+      SERVICES_YAML+="
+
+- Tools:$TOOLS_TILES"
+    fi
   fi
 
   # Write via heredoc; the printf %s ... is fed into pct exec's stdin which
@@ -722,6 +756,21 @@ layout:
   Sandbox:
     style: row
     columns: 1"
+  fi
+
+  # Tools group layout — present whenever filebrowser will be installed on
+  # at least one target. Two-column when both ollama-pi-agent and sandbox
+  # are present (typical case), single-column otherwise.
+  if (( ! SKIP_FILEBROWSER )); then
+    local TOOLS_COLS=0
+    [[ -n "$PI_HOST_CTID" ]] && TOOLS_COLS=$((TOOLS_COLS + 1))
+    [[ -n "$SANDBOX_CTID" ]] && TOOLS_COLS=$((TOOLS_COLS + 1))
+    if (( TOOLS_COLS > 0 )); then
+      SETTINGS_YAML+="
+  Tools:
+    style: row
+    columns: $TOOLS_COLS"
+    fi
   fi
 
   if (( DRY_RUN )); then
@@ -857,6 +906,11 @@ configure_filebrowser() {
   # Reuse the admin credentials the user already provided. Same UX as
   # Gitea + OpenWebUI — one credential set across the homelab.
   FB_ARGS+=(--admin-user "$ADMIN_USER" --admin-password "$ADMIN_PASSWORD")
+
+  # Suppress the addon's marker-based Homepage tile registration. We already
+  # embedded the filebrowser tiles directly in configure_homepage's
+  # services.yaml — letting the addon also register would produce duplicates.
+  FB_ARGS+=(--skip-homepage-tile)
 
   # Pass --dry-run through if configure-apps was invoked that way.
   (( DRY_RUN )) && FB_ARGS+=(--dry-run)
