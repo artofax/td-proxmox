@@ -31,7 +31,7 @@
 #   ./setup-new-pi-agent.sh                                  # auto-hostname (pi-agent-N), all defaults
 #   ./setup-new-pi-agent.sh --hostname pi-agent-research     # explicit name
 #   ./setup-new-pi-agent.sh --hostname pi-agent-fast --cpu 8 --ram 8192 --model gemma3:12b-cloud
-#   ./setup-new-pi-agent.sh --with-filebrowser               # also install filebrowser
+#   ./setup-new-pi-agent.sh --skip-filebrowser               # install everything EXCEPT filebrowser
 #   ./setup-new-pi-agent.sh --skip-web-uis --skip-homepage-tile  # bare Ollama+pi only
 #
 # Optional flags:
@@ -44,7 +44,9 @@
 #   --ts-authkey KEY      Tailscale auth key (else prompted)
 #   --ct-password PW      CT root password (else prompted)
 #   --skip-web-uis        Skip the cards/term/shell install + their Homepage tiles
-#   --with-filebrowser    Also install filebrowser on the new agent (port 8080)
+#   --skip-filebrowser    Don't install filebrowser on the new agent
+#                         (filebrowser is now default-on; --with-filebrowser
+#                         is accepted as a no-op for back-compat)
 #   --skip-trust-mesh     Don't wire SSH trust to/from existing CTs (manual setup later)
 #   --skip-homepage-tile  Don't register the agent's "machine" tile on Homepage
 #                         (the web-UIs tile is still registered if --skip-web-uis isn't set)
@@ -67,7 +69,7 @@ MODEL=""
 TS_AUTHKEY=""
 CT_PASSWORD=""
 SKIP_WEB_UIS=0
-WITH_FILEBROWSER=0
+SKIP_FILEBROWSER=0
 SKIP_TRUST_MESH=0
 SKIP_HOMEPAGE_TILE=0
 SKIP_SMB_SHARE=0
@@ -85,7 +87,8 @@ while [[ $# -gt 0 ]]; do
     --ts-authkey)         TS_AUTHKEY="$2"; shift 2 ;;
     --ct-password)        CT_PASSWORD="$2"; shift 2 ;;
     --skip-web-uis)       SKIP_WEB_UIS=1; shift ;;
-    --with-filebrowser)   WITH_FILEBROWSER=1; shift ;;
+    --skip-filebrowser)   SKIP_FILEBROWSER=1; shift ;;
+    --with-filebrowser)   shift ;;  # back-compat no-op: filebrowser is now default-on
     --skip-trust-mesh)    SKIP_TRUST_MESH=1; shift ;;
     --skip-smb-share)     SKIP_SMB_SHARE=1; shift ;;
     --skip-homepage-tile) SKIP_HOMEPAGE_TILE=1; shift ;;
@@ -233,7 +236,7 @@ log "  Workstation key: ${SSH_KEY:0:50}..."
 [[ -n "$MODEL" ]] && log "  Ollama model:    $MODEL" || log "  Ollama model:    (setup-ollama-pi default — currently gemma4:31b-cloud)"
 log "  Trust mesh:      $((( SKIP_TRUST_MESH )) && echo skipped || echo bidirectional with existing CTs)"
 log "  Web UIs:         $((( SKIP_WEB_UIS )) && echo skipped || echo cards/term/shell on 9090/9091/9092)"
-log "  Filebrowser:     $((( WITH_FILEBROWSER )) && echo yes || echo no)"
+log "  Filebrowser:     $((( SKIP_FILEBROWSER )) && echo skipped || echo /root/uploads on smb://$HOSTNAME:8080)"
 log "  SMB share:       $((( SKIP_SMB_SHARE )) && echo skipped || echo /root over smb://$HOSTNAME/home)"
 log "  Homepage tile:   $((( SKIP_HOMEPAGE_TILE )) && echo skipped || echo registered)"
 log "================================================================"
@@ -348,7 +351,7 @@ if (( ! DRY_RUN )) && (( ! SKIP_WEB_UIS )); then
     warn "Then re-invoke this script (it'll skip the parts already done) or"
     warn "just run the remaining addons:"
     warn "  $SETUP_WEB_UIS --hostname $HOSTNAME"
-    if (( WITH_FILEBROWSER )); then
+    if (( ! SKIP_FILEBROWSER )); then
       warn "  $SETUP_FB --target $HOSTNAME"
     fi
     warn "================================================================"
@@ -425,11 +428,15 @@ if (( ! SKIP_WEB_UIS )); then
   run "'$SETUP_WEB_UIS' --hostname '$HOSTNAME'"
 fi
 
-# ----- optional filebrowser ------------------------------------------------
-if (( WITH_FILEBROWSER )) && [[ -x "$SETUP_FB" ]]; then
+# ----- filebrowser (default-on; --skip-filebrowser to opt out) ------------
+if (( ! SKIP_FILEBROWSER )) && [[ -x "$SETUP_FB" ]]; then
   log "================================================================"
-  log "Delegating to setup-filebrowser.sh for filebrowser..."
+  log "Delegating to setup-filebrowser.sh..."
   log "================================================================"
+  # setup-filebrowser.sh will prompt for admin user + password since this
+  # script doesn't manage homelab admin creds — that lives with the main
+  # configure-apps.sh flow. Tip: reuse the same admin creds you use for
+  # Gitea/OpenWebUI to keep one password to remember.
   run "'$SETUP_FB' --target '$HOSTNAME'"
 fi
 
@@ -500,7 +507,7 @@ log "  Cards UI:    http://$HOSTNAME:9090"
 log "  pi terminal: http://$HOSTNAME:9091"
 log "  Plain shell: http://$HOSTNAME:9092"
 fi
-if (( WITH_FILEBROWSER )); then
+if (( ! SKIP_FILEBROWSER )); then
 log "  Files:       http://$HOSTNAME:8080"
 fi
 if (( ! SKIP_SMB_SHARE )); then

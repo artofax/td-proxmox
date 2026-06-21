@@ -44,10 +44,16 @@
 #   --openwebui-ctid 100
 #   --pi-host-ctid 200      The ollama-pi-agent CT
 #   --homepage-ctid 110     The Homepage dashboard CT
-#   --only gitea,homepage   Subset of subsystems (gitea, openwebui, pi, homepage)
+#   --only gitea,homepage   Subset of subsystems (gitea, openwebui, pi, homepage, filebrowser)
+#   --skip-filebrowser      Don't install filebrowser on ollama-pi-agent / sandbox
 #   --dry-run               Preview commands; uses placeholders, skips prompts.
 
 set -Eeuo pipefail
+
+# Resolve our own location so configure_filebrowser can find the sibling
+# addon script (addons/setup-filebrowser.sh) regardless of how this script
+# was invoked.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ----- defaults --------------------------------------------------------------
 # CTIDs are looked up by HOSTNAME at startup (see resolve_ctids below). The
@@ -64,6 +70,7 @@ ADMIN_EMAIL=""
 ADMIN_PASSWORD=""
 OPENROUTER_KEY=""
 ONLY=""
+SKIP_FILEBROWSER=0
 DRY_RUN=0
 
 TOKENS_FILE="/root/td-tokens.txt"
@@ -81,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --homepage-ctid)  HOMEPAGE_CTID="$2"; shift 2 ;;
     --debian1-ctid)   PI_HOST_CTID="$2"; shift 2 ;;  # deprecated alias, accepted for back-compat
     --only)           ONLY="$2"; shift 2 ;;
+    --skip-filebrowser) SKIP_FILEBROWSER=1; shift ;;
     --dry-run)        DRY_RUN=1; shift ;;
     -h|--help)        sed -n '2,35p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -793,6 +801,58 @@ DROPIN
   log "  Homepage reachable at: http://$HOMEPAGE_IP:3000  (or http://homepage:3000 on the tailnet)"
 }
 
+# ----- filebrowser -----------------------------------------------------------
+# Drag-and-drop web UI for getting files onto the pi host (so pi can read them)
+# and the sandbox CT (so docker workloads can use them). Installed on both
+# targets by default; either gets skipped if the corresponding CT doesn't
+# exist (e.g., --skip-sandbox in bootstrap).
+#
+# Delegates to addons/setup-filebrowser.sh — that script handles the full
+# install (apt-get samba & friends, systemd unit, JSON-auth db, Homepage tile
+# registration). We just pass it the target list + the reused admin creds.
+configure_filebrowser() {
+  log "Configuring filebrowser..."
+
+  # Locate the addon. configure-apps.sh lives in automation/; the addon is
+  # in addons/. SCRIPT_DIR is set early in the script.
+  local SETUP_FB="$SCRIPT_DIR/../addons/setup-filebrowser.sh"
+  if [[ ! -x "$SETUP_FB" ]]; then
+    warn "  setup-filebrowser.sh not found at $SETUP_FB — skipping. (Are you running from a clone of the repo?)"
+    return
+  fi
+
+  # Determine which targets to install on. The addon defaults to
+  # ollama-pi-agent + sandbox, but we want to skip a target if its CT
+  # isn't actually there (instead of letting the addon die).
+  local -a FB_ARGS=()
+  if [[ -n "$PI_HOST_CTID" ]]; then
+    FB_ARGS+=(--target ollama-pi-agent)
+  fi
+  if [[ -n "$SANDBOX_CTID" ]]; then
+    # Use whatever hostname the sandbox CT actually has (sandbox or docker
+    # for users mid-rename).
+    local sandbox_hn
+    sandbox_hn="$(pct config "$SANDBOX_CTID" 2>/dev/null | awk '/^hostname:/ {print $2}')"
+    : "${sandbox_hn:=sandbox}"
+    FB_ARGS+=(--target "$sandbox_hn")
+  fi
+
+  if [[ ${#FB_ARGS[@]} -eq 0 ]]; then
+    log "  No targets (neither ollama-pi-agent nor sandbox CT exists) — skipping."
+    return
+  fi
+
+  # Reuse the admin credentials the user already provided. Same UX as
+  # Gitea + OpenWebUI — one credential set across the homelab.
+  FB_ARGS+=(--admin-user "$ADMIN_USER" --admin-password "$ADMIN_PASSWORD")
+
+  # Pass --dry-run through if configure-apps was invoked that way.
+  (( DRY_RUN )) && FB_ARGS+=(--dry-run)
+
+  log "  Delegating to setup-filebrowser.sh with targets: ${FB_ARGS[*]}"
+  run "'$SETUP_FB' ${FB_ARGS[*]}"
+}
+
 # ----- final summary ---------------------------------------------------------
 write_summary() {
   local now; now="$(date -Iseconds)"
@@ -827,15 +887,19 @@ TOKENS"
 
 # ----- driver ----------------------------------------------------------------
 main() {
-  log "==> Configure apps: Gitea + OpenWebUI + pi (ollama-pi-agent) + Homepage"
+  log "==> Configure apps: Gitea + OpenWebUI + pi (ollama-pi-agent) + Homepage + filebrowser"
   resolve_ctids
-  selected gitea     && configure_gitea
+  selected gitea       && configure_gitea
   # configure_openwebui only runs if (a) selected and (b) the CT actually
   # exists. Bootstrap-pve.sh's --skip-openwebui makes the CT optional, so
   # we silently skip the config rather than fail when the CT is absent.
-  selected openwebui && [[ -n "$OPENWEBUI_CTID" ]] && configure_openwebui
-  selected pi        && configure_pi_host
-  selected homepage  && configure_homepage
+  selected openwebui   && [[ -n "$OPENWEBUI_CTID" ]] && configure_openwebui
+  selected pi          && configure_pi_host
+  selected homepage    && configure_homepage
+  # filebrowser auto-targets ollama-pi-agent + sandbox if those CTs exist.
+  # Skips silently per-target if a CT is absent. Opt out with --skip-filebrowser
+  # or via --only (which excludes it implicitly).
+  selected filebrowser && (( ! SKIP_FILEBROWSER )) && configure_filebrowser
   write_summary
   log "==> Done."
 }

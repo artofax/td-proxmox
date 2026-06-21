@@ -12,7 +12,7 @@ For pi (or you, writing scripts that pi runs) registering tiles on the Homepage 
 
 | Script | What it does | Target | Time |
 |---|---|---|---|
-| [`setup-filebrowser.sh`](setup-filebrowser.sh) | Drag-and-drop web UI for getting files into `ollama-pi-agent` (pi reads them) and `sandbox` (Dockerfiles, compose files, project source) | `ollama-pi-agent`, `sandbox` | ~3 min |
+| [`setup-filebrowser.sh`](setup-filebrowser.sh) **(auto-installed)** | Drag-and-drop web UI for getting files into `ollama-pi-agent` (pi reads them) and `sandbox` (Dockerfiles, compose files, project source). Auto-installed by the main `configure-apps.sh` flow; this addon is for re-runs, extra targets, or opt-out via `--skip-filebrowser` | `ollama-pi-agent`, `sandbox` | ~3 min |
 | [`setup-pi-web-uis.sh`](setup-pi-web-uis.sh) | Three browser UIs on `ollama-pi-agent`: cards (9090), pi terminal (9091), plain bash shell (9092) | `ollama-pi-agent` | ~5 min |
 | [`setup-port80-redirect.sh`](setup-port80-redirect.sh) | Kernel-level NAT redirect so `http://gitea`, `http://openwebui`, `http://homepage` work without typing `:3000` / `:8080` | `gitea`, `openwebui`, `homepage` | ~1 min |
 | [`setup-pve-etc-backup.sh`](setup-pve-etc-backup.sh) | Daily systemd timer that snapshots `/etc/pve` + host network/SSH/apt config to your backup drive (vzdump doesn't cover these) | PVE host | <1 min |

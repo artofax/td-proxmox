@@ -162,6 +162,8 @@ Drop `--dry-run` to commit. The script:
 3. On ollama-pi-agent, writes `/root/.netrc` with the Gitea creds and persists `OPENROUTER_API_KEY` in `/root/.bashrc`.
 4. On homepage, writes a starter `services.yaml` (Gitea + widget, OpenWebUI, ollama-pi-agent, sandbox), `settings.yaml` (theme, title, layout), `bookmarks.yaml` (Proxmox + Tailscale + OpenRouter + Ollama admin links), and `widgets.yaml` (resources + search bar), then restarts the service.
 
+5. On `ollama-pi-agent` and `sandbox`, installs [filebrowser](https://github.com/filebrowser/filebrowser) — a drag-and-drop web UI for `/root/uploads/` on each. Available at `http://ollama-pi-agent:8080` and `http://sandbox:8080`. Reuses the admin user/password you provided for Gitea + OpenWebUI; tile auto-registers on the Homepage dashboard.
+
 A credentials summary is written to `/root/td-tokens.txt` (chmod 600) and echoed to stdout. Open `http://homepage:3000` from any tailnet device — every tile already points at the right place.
 
 ---
