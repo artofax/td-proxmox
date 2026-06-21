@@ -356,11 +356,25 @@ configure_gitea() {
         --must-change-password=false \
         --config $GITEA_CONFIG || echo '  (user may already exist)'\""
 
-  # Mint an access token with full scope
+  # Mint an access token with full scope.
+  # Gitea refuses to create a duplicate token by name (it returns an error
+  # and exits non-zero), so on a re-run we always delete the existing
+  # 'pi-agent' token first. delete-access-token is harmless if no token
+  # with that name exists (just prints an error and returns non-zero, which
+  # we swallow). Net effect: every run produces a fresh, working token.
   log "  Minting access token (name: pi-agent)..."
   GITEA_TOKEN=""
   if (( ! DRY_RUN )); then
-    # Gitea's success message is one of:
+    # Delete any existing token with this name first. Without this, re-runs
+    # silently produce an empty $GITEA_TOKEN, which then propagates into
+    # services.yaml as the literal placeholder 'REPLACE_WITH_GITEA_TOKEN'
+    # and breaks the Homepage Gitea widget.
+    pct exec "$GITEA_CTID" -- bash -lc "sudo -u $GITEA_USER gitea admin user delete-access-token \
+        --username '$ADMIN_USER' \
+        --token-name 'pi-agent' \
+        --config $GITEA_CONFIG" >/dev/null 2>&1 || true
+
+    # Now mint fresh. Gitea's success message is one of:
     #   "Access token was successfully created: <hex>"   (newer versions)
     #   "Access token: <hex>"                            (older versions)
     # Both have the token as the last field, so use $NF rather than splitting
@@ -370,8 +384,17 @@ configure_gitea() {
         --token-name 'pi-agent' \
         --scopes 'all' \
         --config $GITEA_CONFIG 2>/dev/null | awk '/^Access token/{print \$NF}'" || true)"
+
     if [[ -z "$GITEA_TOKEN" ]]; then
-      warn "  Token generation returned empty — token may already exist with this name. Re-run with a fresh --token-name or revoke in Gitea UI."
+      # If delete + remint both failed, something more fundamental is broken.
+      # Fall back to listing existing tokens so the user can see what's there.
+      warn "  Token mint returned empty even after deleting old token."
+      warn "  Existing tokens for $ADMIN_USER:"
+      pct exec "$GITEA_CTID" -- bash -lc "sudo -u $GITEA_USER gitea admin user list-access-tokens \
+          --username '$ADMIN_USER' --config $GITEA_CONFIG 2>&1" | sed 's/^/    /' >&2 || true
+      warn "  Homepage Gitea widget will fall back to placeholder key — fix manually:"
+      warn "    1) Generate a token in Gitea UI → http://$GITEA_IP:3000/-/user/settings/applications"
+      warn "    2) sed -i 's|key: REPLACE_WITH_GITEA_TOKEN|key: <your-token>|' <homepage-services.yaml>"
     fi
   else
     GITEA_TOKEN="DRYRUN_GITEA_TOKEN_PLACEHOLDER"
@@ -552,7 +575,30 @@ configure_homepage() {
   : "${PVE_IP:=10.0.0.1}"
 
   # Gitea token may be empty if --only homepage was used without --only gitea.
-  local GITEA_KEY="${GITEA_TOKEN:-REPLACE_WITH_GITEA_TOKEN}"
+  # When that happens, try to recover the previously-written token from the
+  # existing services.yaml so the widget keeps working across re-runs. If
+  # nothing's there either, fall back to the placeholder and warn loudly.
+  local GITEA_KEY="${GITEA_TOKEN}"
+  if [[ -z "$GITEA_KEY" ]]; then
+    local EXISTING_KEY
+    EXISTING_KEY="$(pct exec "$HOMEPAGE_CTID" -- bash -lc "
+      for d in /opt/homepage/config /opt/homepage /homepage/config /etc/homepage /var/lib/homepage/config; do
+        if [[ -f \"\$d/services.yaml\" ]]; then
+          awk '/type: gitea/,/^- / { if (\$1==\"key:\") {print \$2; exit} }' \"\$d/services.yaml\"
+          exit
+        fi
+      done
+    " 2>/dev/null | tr -d '\r\n ')"
+    if [[ -n "$EXISTING_KEY" && "$EXISTING_KEY" != "REPLACE_WITH_GITEA_TOKEN" ]]; then
+      log "  Reusing existing Gitea token from prior services.yaml (configure_gitea not run this invocation)."
+      GITEA_KEY="$EXISTING_KEY"
+    else
+      warn "  GITEA_TOKEN is empty AND no usable token in existing services.yaml."
+      warn "  Homepage Gitea widget will render with placeholder key (won't fetch data)."
+      warn "  Fix: re-run with 'configure-apps.sh --only gitea,homepage' to mint + wire fresh."
+      GITEA_KEY="REPLACE_WITH_GITEA_TOKEN"
+    fi
+  fi
 
   # ---- services.yaml ----
   # Build conditionally so the Open WebUI tile and the Sandbox group are
