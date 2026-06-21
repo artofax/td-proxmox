@@ -302,7 +302,11 @@ resolve_tsauthkey() {
     return
   fi
 
-  printf "\n\033[1;36m[bootstrap]\033[0m Paste your Tailscale auth key (tskey-auth-...). Input hidden:\n> " >&2
+  printf "\n\033[1;36m[bootstrap]\033[0m Tailscale auth key needed (tskey-auth-...). Input hidden.\n" >&2
+  printf "\033[1;33m  IMPORTANT: the key MUST be reusable — bootstrap joins 5 CTs with this one key.\n" >&2
+  printf "  A default (single-use) key will succeed on CT #1 and reject every CT after.\n" >&2
+  printf "  Create one at https://login.tailscale.com/admin/settings/keys with Reusable=ON.\033[0m\n" >&2
+  printf "\n\033[1;36m[bootstrap]\033[0m > " >&2
   IFS= read -rs TS_AUTHKEY
   echo >&2
   [[ "$TS_AUTHKEY" =~ ^tskey-(auth|client)- ]] \
@@ -767,8 +771,14 @@ or pass it via flag: /root/bootstrap-pve.sh --tsauthkey tskey-auth-..."
   # can flip --ssh back on AND configure their tailnet ACLs to permit
   # 'autogroup:owner' SSH access to these tagged devices.
   log "  tailscale up --authkey ... --hostname $HOSTNAME"
-  run "pct exec $CTID -- tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME --accept-routes \
-       || pct exec $CTID -- tailscale up --authkey=$TS_AUTHKEY --hostname=$HOSTNAME"
+  # --reset clears any prior partial config. Without it, a previous
+  # `tailscale up` attempt that failed (e.g., one-time key rejected on the
+  # 2nd CT, network blip mid-auth) leaves stale settings that cause the
+  # retry to fail with "changing settings requires mentioning all
+  # non-default flags". With --reset, every CT starts from a known clean
+  # state on each attempt.
+  run "pct exec $CTID -- tailscale up --reset --authkey=$TS_AUTHKEY --hostname=$HOSTNAME --accept-routes \
+       || pct exec $CTID -- tailscale up --reset --authkey=$TS_AUTHKEY --hostname=$HOSTNAME"
 
   # Show the 100.x for our final summary.
   run "pct exec $CTID -- tailscale ip -4 || true"
