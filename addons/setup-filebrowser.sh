@@ -104,15 +104,27 @@ resolve_admin_user() {
 }
 
 resolve_admin_password() {
-  if [[ -n "$ADMIN_PASSWORD" ]]; then return; fi
-  if (( DRY_RUN )); then ADMIN_PASSWORD="dryrun-placeholder-pw"; log "Dry-run: using placeholder admin password."; return; fi
+  # 12-char minimum matches filebrowser's hardcoded check (recent versions
+  # bumped this from 8; the check is in the filebrowser binary and not
+  # overridable via flag). Validate upfront whether the password came from
+  # --admin-password or from the prompt so the failure mode is clear text
+  # rather than the cryptic 'Error: password is too short, minimum length
+  # is 12' from filebrowser deep inside the install.
+  if [[ -n "$ADMIN_PASSWORD" ]]; then
+    [[ ${#ADMIN_PASSWORD} -ge 12 ]] \
+      || die "Admin password from --admin-password is too short (need >= 12 chars).
+  Filebrowser recent versions hardcode a 12-char minimum. Either pass a
+  longer --admin-password or omit the flag and the script will prompt."
+    return
+  fi
+  if (( DRY_RUN )); then ADMIN_PASSWORD="dryrun-placeholder-pw-12"; log "Dry-run: using placeholder admin password."; return; fi
   local pw1 pw2
-  printf "\n\033[1;36m[setup-filebrowser]\033[0m Admin password (hidden; min 8 chars): " >&2
+  printf "\n\033[1;36m[setup-filebrowser]\033[0m Admin password (hidden; min 12 chars — filebrowser's requirement): " >&2
   IFS= read -rs pw1; echo >&2
   printf "Confirm: " >&2
   IFS= read -rs pw2; echo >&2
   [[ "$pw1" == "$pw2"  ]] || die "Passwords didn't match."
-  [[ ${#pw1} -ge 8     ]] || die "Password too short (need >= 8 chars)."
+  [[ ${#pw1} -ge 12    ]] || die "Password too short (need >= 12 chars to satisfy filebrowser)."
   ADMIN_PASSWORD="$pw1"
 }
 

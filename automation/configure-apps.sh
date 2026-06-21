@@ -129,15 +129,25 @@ resolve_admin_email() {
 }
 
 resolve_admin_password() {
-  if [[ -n "$ADMIN_PASSWORD" ]]; then return; fi
-  if (( DRY_RUN )); then ADMIN_PASSWORD="dryrun-placeholder-pw"; log "Dry-run: using placeholder admin password."; return; fi
+  if [[ -n "$ADMIN_PASSWORD" ]]; then
+    # When --admin-password was passed via flag, still validate length so
+    # downstream filebrowser doesn't barf later. 12 chars is filebrowser's
+    # hardcoded minimum since recent versions.
+    [[ ${#ADMIN_PASSWORD} -ge 12 ]] \
+      || die "Admin password from --admin-password is too short (need >= 12 chars to satisfy filebrowser)."
+    return
+  fi
+  if (( DRY_RUN )); then ADMIN_PASSWORD="dryrun-placeholder-pw-12"; log "Dry-run: using placeholder admin password."; return; fi
   local pw1 pw2
-  printf "\n\033[1;36m[configure-apps]\033[0m Admin password (hidden; min 8 chars): " >&2
+  # 12 char minimum is dictated by filebrowser (the most strict of the
+  # services we configure). Gitea/OpenWebUI accept anything 8+, but enforcing
+  # one number everywhere means a single password works across all four.
+  printf "\n\033[1;36m[configure-apps]\033[0m Admin password (hidden; min 12 chars — filebrowser's requirement): " >&2
   IFS= read -rs pw1; echo >&2
   printf "Confirm: " >&2
   IFS= read -rs pw2; echo >&2
   [[ "$pw1" == "$pw2"  ]] || die "Passwords didn't match."
-  [[ ${#pw1} -ge 8     ]] || die "Password too short (need >= 8 chars)."
+  [[ ${#pw1} -ge 12    ]] || die "Password too short (need >= 12 chars to satisfy filebrowser)."
   ADMIN_PASSWORD="$pw1"
 }
 
