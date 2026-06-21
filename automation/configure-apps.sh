@@ -64,6 +64,8 @@ GITEA_CTID=""
 OPENWEBUI_CTID=""
 PI_HOST_CTID=""
 HOMEPAGE_CTID=""
+SANDBOX_CTID=""  # Used only by configure_homepage and configure_filebrowser
+                 # to decide whether to render/install for sandbox.
 
 ADMIN_USER=""
 ADMIN_EMAIL=""
