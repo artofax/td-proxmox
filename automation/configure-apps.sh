@@ -743,17 +743,38 @@ YAML'"
     target: _blank
 YAML'"
 
-  # Drop a systemd override setting HOMEPAGE_ALLOWED_HOSTS=*. Homepage v0.10+
+  # Drop a systemd override populating HOMEPAGE_ALLOWED_HOSTS. Homepage v0.10+
   # validates the incoming Host header against an allowlist; community-scripts
   # installs don't set one, so the default deployment rejects any access
-  # except 'localhost'. '*' accepts any Host — fine for a private homelab.
-  # Idempotent — re-runs no-op if the drop-in is already present.
-  log "  Allowing all Host headers (HOMEPAGE_ALLOWED_HOSTS=*)..."
+  # except 'localhost'.
+  #
+  # We used to set '*' for wildcard, but Homepage 1.13+ with Next.js 16
+  # stopped honoring wildcards — the validator requires explicit hostnames.
+  # Build the allowlist dynamically from the CT's actual addresses:
+  #   homepage / homepage:3000           — MagicDNS hostname (tailnet)
+  #   localhost / localhost:3000         — local + port-forward access
+  #   127.0.0.1 / 127.0.0.1:3000         — loopback
+  #   <LAN-IP> / <LAN-IP>:3000           — direct LAN access
+  #   <Tailscale-IP> / <Tailscale-IP>:3000 — tailnet direct-IP access
+  # Both with-port and without-port forms cover the case where browsers send
+  # 'Host: homepage:3000' (most do) vs 'Host: homepage' (some reverse proxies).
+  log "  Populating HOMEPAGE_ALLOWED_HOSTS (explicit list — wildcards broke in Homepage 1.13+)..."
+
+  local HP_LAN_IP HP_TS_IP HP_ALLOWED
+  HP_LAN_IP="$(pct exec "$HOMEPAGE_CTID" -- hostname -I 2>/dev/null | awk '{print $1}')"
+  HP_TS_IP="$(pct exec "$HOMEPAGE_CTID" -- tailscale ip -4 2>/dev/null | head -1)"
+
+  HP_ALLOWED="homepage,homepage:3000,localhost,localhost:3000,127.0.0.1,127.0.0.1:3000"
+  [[ -n "$HP_LAN_IP" ]] && HP_ALLOWED+=",${HP_LAN_IP},${HP_LAN_IP}:3000"
+  [[ -n "$HP_TS_IP"  ]] && HP_ALLOWED+=",${HP_TS_IP},${HP_TS_IP}:3000"
+
+  log "    → $HP_ALLOWED"
+
   run "pct exec $HOMEPAGE_CTID -- bash -lc '
     mkdir -p /etc/systemd/system/homepage.service.d
     cat > /etc/systemd/system/homepage.service.d/allowed-hosts.conf <<DROPIN
 [Service]
-Environment=\"HOMEPAGE_ALLOWED_HOSTS=*\"
+Environment=\"HOMEPAGE_ALLOWED_HOSTS=$HP_ALLOWED\"
 DROPIN
     systemctl daemon-reload
   '"
