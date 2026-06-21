@@ -1,8 +1,17 @@
 # TD-Proxmox — Automated Build Run Sheet
 
-End state after a full run: a Proxmox VE 9.x host with five LXC containers (`ollama-pi-agent`, `sandbox`, `gitea`, `openwebui`, `homepage`), all joined to your Tailscale tailnet, Gitea + OpenWebUI configured with admin accounts and an OpenRouter connection, Homepage running with a default dashboard ready for pi to populate, and pi itself running on `ollama-pi-agent`. The `sandbox` CT is a Docker host (built via the community `docker.sh` helper) — it's named `sandbox` rather than `docker` so prompts like "run a docker image on sandbox" stay unambiguous.
+End state after a full run: a Proxmox VE 9.x host with up to five LXC containers, all joined to your Tailscale tailnet.
 
-Total time from "USB plugged in" to "Homepage dashboard up": ~45 minutes, of which roughly 10 minutes is your hands on the keyboard.
+**Core CTs (always installed):**
+- `ollama-pi-agent` — pi coding agent runtime
+- `gitea` — self-hosted Git with admin account and access token
+- `homepage` — dashboard with tiles for everything running
+
+**Optional CTs (interactive Y/n prompt at bootstrap start, or `--skip-sandbox` / `--skip-openwebui` flags):**
+- `sandbox` — Docker host for ad-hoc workloads (named `sandbox` rather than `docker` so prompts like "run a docker image on sandbox" stay unambiguous)
+- `openwebui` — ChatGPT-style UI in front of Ollama + OpenRouter
+
+A quick install (core only) takes ~25 minutes; the full install (everything) takes ~45 minutes. Either way roughly 10 minutes is hands-on-keyboard.
 
 ---
 

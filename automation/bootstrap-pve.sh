@@ -16,8 +16,8 @@
 #   --sshkey-text <key>    Or paste the whole 'ssh-... AAAA... user@host' string.
 #   --tsauthkey   <key>    Tailscale auth key (tskey-auth-...).
 #                          Generate at https://login.tailscale.com/admin/settings/keys.
-#   --ct-password <pw>     Root password for ollama-pi-agent + sandbox (TS auth-key
-#                          login means you rarely need this, but pct create needs one).
+#   --ct-password <pw>     Root password for ollama-pi-agent (TS auth-key login means
+#                          you rarely need this, but pct create needs one).
 #
 # When --sshkey-file/--sshkey-text is missing the script prompts you to paste
 # a public key (one line). When --tsauthkey or --ct-password is missing it
@@ -26,15 +26,20 @@
 # Optional flags:
 #   --skip-update          Skip apt update/upgrade
 #   --skip-repos           Don't touch repo files
+#   --skip-sandbox         Omit the sandbox (Docker host) CT
+#   --skip-openwebui       Omit the openwebui (chat UI) CT
+#   --yes, -y              Skip interactive install-profile prompts (use defaults / flags)
 #   --only ollama-pi-agent,gitea   Subset of CTs (comma-separated keys)
 #   --dry-run              Print commands instead of running them
 #
 # CTs created (DHCP, IPv6 SLAAC, bridge vmbr0):
-#   200  ollama-pi-agent  pct create — Debian 12 + manual Ollama/pi (Phase 4)
-#   215  sandbox          via community-scripts.org/ct/docker.sh (Docker preinstalled)
-#   202  gitea            via community-scripts.org/ct/gitea.sh
-#   100  openwebui        via community-scripts.org/ct/openwebui.sh
-#   110  homepage         via community-scripts.org/ct/homepage.sh (dashboard)
+#   CORE (always installed):
+#     200  ollama-pi-agent  pct create — Debian 12 + manual Ollama/pi (Phase 4)
+#     202  gitea            via community-scripts.org/ct/gitea.sh
+#     110  homepage         via community-scripts.org/ct/homepage.sh (dashboard)
+#   OPTIONAL (interactive Y/n prompt, or skip with --skip-* flags):
+#     215  sandbox          via community-scripts.org/ct/docker.sh (Docker preinstalled)
+#     100  openwebui        via community-scripts.org/ct/openwebui.sh
 #
 # After each CT comes up, the Tailscale add-on is applied and `tailscale up`
 # runs with --authkey for non-interactive auth.
@@ -73,6 +78,16 @@ ONLY=""
 DRY_RUN=0
 TMP_SSHKEY_FILE=""   # populated if we have to materialise a pasted key
 
+# Optional CTs. The CORE homelab is ollama-pi-agent + gitea + homepage:
+# pi runs on ollama-pi-agent, Gitea hosts your code, Homepage gives you a
+# dashboard. The OPTIONAL CTs are sandbox (Docker host for ad-hoc workloads)
+# and openwebui (ChatGPT-style UI in front of Ollama + OpenRouter). Default
+# is "install everything" — pass --skip-sandbox / --skip-openwebui or answer
+# 'n' at the interactive prompt to omit them.
+WANT_SANDBOX=1
+WANT_OPENWEBUI=1
+INSTALL_PROFILE_PROMPT=1   # set to 0 by --yes or when both --skip-* flags given
+
 # CTID -> hostname / role
 # Hostnames must be DNS-safe (alphanumeric + hyphens, no spaces) — that's a
 # constraint of LXC/Linux, not of this script. The CT that runs Docker is
@@ -110,6 +125,9 @@ while [[ $# -gt 0 ]]; do
     --ct-password)   CT_PASSWORD="$2"; shift 2 ;;
     --skip-update)   SKIP_UPDATE=1; shift ;;
     --skip-repos)    SKIP_REPOS=1; shift ;;
+    --skip-sandbox)  WANT_SANDBOX=0; INSTALL_PROFILE_PROMPT=0; shift ;;
+    --skip-openwebui) WANT_OPENWEBUI=0; INSTALL_PROFILE_PROMPT=0; shift ;;
+    --yes|-y)        INSTALL_PROFILE_PROMPT=0; shift ;;
     --only)          ONLY="$2"; shift 2 ;;
     --dry-run)       DRY_RUN=1; shift ;;
     -h|--help)       sed -n '2,45p' "$0"; exit 0 ;;
@@ -129,6 +147,57 @@ run() {
     eval "$@"
   fi
 }
+
+# ----- install profile prompt (which optional CTs to install) ---------------
+# Core CTs (always installed): ollama-pi-agent, gitea, homepage.
+# Optional CTs: sandbox (Docker host), openwebui (chat UI).
+# Default-Y prompts so just pressing Enter installs everything. Pass --yes
+# to skip prompts and accept defaults; --skip-sandbox / --skip-openwebui
+# to opt out non-interactively.
+#
+# Quick install (core only):   ./bootstrap-pve.sh --skip-sandbox --skip-openwebui
+# Default (everything):        ./bootstrap-pve.sh
+# Non-interactive default:     ./bootstrap-pve.sh --yes
+if (( INSTALL_PROFILE_PROMPT )) && (( ! DRY_RUN )); then
+  printf "\n\033[1;36m[bootstrap]\033[0m Choose what to install. Core CTs (always): ollama-pi-agent, gitea, homepage.\n"
+  printf "  Press Enter for the recommended default (yes) on each question.\n\n"
+
+  printf "  Install \033[1msandbox\033[0m (Docker host CT for ad-hoc workloads)? [Y/n]: "
+  IFS= read -r ans
+  case "${ans,,}" in
+    n|no) WANT_SANDBOX=0 ;;
+    *)    WANT_SANDBOX=1 ;;
+  esac
+
+  printf "  Install \033[1mopenwebui\033[0m (ChatGPT-style UI for Ollama + OpenRouter)? [Y/n]: "
+  IFS= read -r ans
+  case "${ans,,}" in
+    n|no) WANT_OPENWEBUI=0 ;;
+    *)    WANT_OPENWEBUI=1 ;;
+  esac
+fi
+
+# Print the resolved install profile so the user sees what's about to happen.
+yn() { (( $1 )) && echo "YES" || echo "no"; }
+log "Install profile:"
+log "  Core (always):       ollama-pi-agent  gitea  homepage"
+log "  sandbox (Docker):    $(yn $WANT_SANDBOX)"
+log "  openwebui (chat):    $(yn $WANT_OPENWEBUI)"
+
+# Filter HELPER_SCRIPTS down to the chosen profile. Iterating the existing
+# array and rebuilding lets us preserve order (sandbox → gitea → openwebui
+# → homepage) so dependencies (e.g., Gitea ready before homepage's tile
+# config tries to reach it) hold.
+declare -a FILTERED_HELPERS=()
+for entry in "${HELPER_SCRIPTS[@]}"; do
+  IFS='|' read -r _ehn _ehost _eurl <<< "$entry"
+  case "$_ehost" in
+    sandbox)   (( WANT_SANDBOX ))   && FILTERED_HELPERS+=("$entry") ;;
+    openwebui) (( WANT_OPENWEBUI )) && FILTERED_HELPERS+=("$entry") ;;
+    *)         FILTERED_HELPERS+=("$entry") ;;
+  esac
+done
+HELPER_SCRIPTS=("${FILTERED_HELPERS[@]}")
 
 [[ $EUID -eq 0 ]] || die "Run as root on the PVE host."
 command -v pveam >/dev/null || die "pveam not found — is this a PVE host?"

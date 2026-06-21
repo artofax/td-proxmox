@@ -180,10 +180,20 @@ resolve_ctids() {
   if [[ -z "$OPENWEBUI_CTID" ]]; then OPENWEBUI_CTID="$(find_ct_by_hostname openwebui 2>/dev/null || true)"; fi
   if [[ -z "$PI_HOST_CTID" ]];   then PI_HOST_CTID="$(find_ct_by_hostname ollama-pi-agent 2>/dev/null || true)"; fi
   if [[ -z "$HOMEPAGE_CTID" ]];  then HOMEPAGE_CTID="$(find_ct_by_hostname homepage   2>/dev/null || true)"; fi
+  # sandbox is optional (omitted by bootstrap's --skip-sandbox) — used only
+  # by configure_homepage to decide whether to render the Sandbox tile.
+  # Look for both 'sandbox' and 'docker' to cover the pre-rename state.
+  if [[ -z "$SANDBOX_CTID" ]]; then
+    SANDBOX_CTID="$(find_ct_by_hostname sandbox 2>/dev/null || true)"
+    [[ -z "$SANDBOX_CTID" ]] && SANDBOX_CTID="$(find_ct_by_hostname docker 2>/dev/null || true)"
+  fi
 
-  # Only complain about the subsystems we're actually going to touch.
+  # Only complain about the subsystems we're actually going to touch. Core
+  # CTs (gitea, ollama-pi-agent, homepage) are hard requirements — if any is
+  # missing, the homelab can't be configured. openwebui is optional: it can
+  # be skipped at bootstrap (--skip-openwebui), so a missing openwebui CT
+  # means we silently skip the openwebui configure step rather than failing.
   selected gitea     && [[ -z "$GITEA_CTID"     ]] && missing+=("gitea")
-  selected openwebui && [[ -z "$OPENWEBUI_CTID" ]] && missing+=("openwebui")
   selected pi        && [[ -z "$PI_HOST_CTID"   ]] && missing+=("ollama-pi-agent")
   selected homepage  && [[ -z "$HOMEPAGE_CTID"  ]] && missing+=("homepage")
 
@@ -191,6 +201,13 @@ resolve_ctids() {
     die "Could not find CT(s) with hostname(s): ${missing[*]}.
   Run 'pct list' and confirm each CT exists and is named correctly.
   You can also pass explicit IDs via --gitea-ctid / --openwebui-ctid / --pi-host-ctid / --homepage-ctid."
+  fi
+
+  # If openwebui was explicitly requested via --only and isn't present, that's
+  # a hard error (the user asked for something that doesn't exist).
+  if [[ -n "$ONLY" ]] && selected openwebui && [[ -z "$OPENWEBUI_CTID" ]]; then
+    die "openwebui requested via --only but no CT with that hostname exists.
+  Either install openwebui (re-run bootstrap-pve.sh without --skip-openwebui) or drop it from --only."
   fi
 
   log "Resolved CTIDs: gitea=${GITEA_CTID:-skip}  openwebui=${OPENWEBUI_CTID:-skip}  pi-host=${PI_HOST_CTID:-skip}  homepage=${HOMEPAGE_CTID:-skip}"
@@ -538,9 +555,13 @@ configure_homepage() {
   local GITEA_KEY="${GITEA_TOKEN:-REPLACE_WITH_GITEA_TOKEN}"
 
   # ---- services.yaml ----
+  # Build conditionally so the Open WebUI tile and the Sandbox group are
+  # omitted when their CTs weren't installed (bootstrap's --skip-openwebui
+  # / --skip-sandbox). Otherwise Homepage shows tiles that link to nothing,
+  # which is confusing.
   log "  Writing $CONFIG_DIR/services.yaml ..."
-  run "pct exec $HOMEPAGE_CTID -- bash -c 'cat > $CONFIG_DIR/services.yaml <<\"YAML\"
----
+
+  local SERVICES_YAML="---
 - Development:
     - Gitea:
         href: http://gitea:3000
@@ -551,26 +572,48 @@ configure_homepage() {
           url: http://gitea:3000
           key: $GITEA_KEY
 
-- AI:
+- AI:"
+  if [[ -n "$OPENWEBUI_CTID" ]]; then
+    SERVICES_YAML+="
     - Open WebUI:
         href: http://openwebui:8080
         description: Chat with OpenRouter + Ollama models
         icon: open-webui.png
-
+"
+  fi
+  SERVICES_YAML+="
     - Ollama Pi Agent:
         description: pi coding agent runtime (ssh root@ollama-pi-agent)
-        icon: ollama.png
+        icon: ollama.png"
+
+  if [[ -n "$SANDBOX_CTID" ]]; then
+    # Resolve the sandbox hostname for the description (could be sandbox or docker)
+    local SANDBOX_HOSTNAME
+    SANDBOX_HOSTNAME="$(pct config "$SANDBOX_CTID" 2>/dev/null | awk '/^hostname:/ {print $2}')"
+    : "${SANDBOX_HOSTNAME:=sandbox}"
+    SERVICES_YAML+="
 
 - Sandbox:
     - Docker:
-        description: Docker host for ad-hoc deployments (ssh root@sandbox)
-        icon: docker.png
-YAML'"
+        description: Docker host for ad-hoc deployments (ssh root@$SANDBOX_HOSTNAME)
+        icon: docker.png"
+  fi
+
+  # Write via heredoc; the printf %s ... is fed into pct exec's stdin which
+  # then redirects to the file. Cleaner than embedding the multi-line string
+  # in a 'bash -c cat <<YAML' which has quoting hell.
+  if (( DRY_RUN )); then
+    printf '[dry-run] would write services.yaml:\n%s\n' "$SERVICES_YAML"
+  else
+    printf '%s\n' "$SERVICES_YAML" | pct exec "$HOMEPAGE_CTID" -- tee "$CONFIG_DIR/services.yaml" > /dev/null
+  fi
 
   # ---- settings.yaml ----
+  # Same conditional treatment — only include layout entries for groups that
+  # actually have tiles, otherwise Homepage gives weird empty group renders.
   log "  Writing $CONFIG_DIR/settings.yaml ..."
-  run "pct exec $HOMEPAGE_CTID -- bash -c 'cat > $CONFIG_DIR/settings.yaml <<\"YAML\"
----
+
+  local SETTINGS_YAML="---
 title: TD Homelab
 theme: dark
 color: slate
@@ -581,11 +624,20 @@ layout:
     columns: 1
   AI:
     style: row
-    columns: 2
+    columns: $([[ -n "$OPENWEBUI_CTID" ]] && echo 2 || echo 1)"
+
+  if [[ -n "$SANDBOX_CTID" ]]; then
+    SETTINGS_YAML+="
   Sandbox:
     style: row
-    columns: 1
-YAML'"
+    columns: 1"
+  fi
+
+  if (( DRY_RUN )); then
+    printf '[dry-run] would write settings.yaml:\n%s\n' "$SETTINGS_YAML"
+  else
+    printf '%s\n' "$SETTINGS_YAML" | pct exec "$HOMEPAGE_CTID" -- tee "$CONFIG_DIR/settings.yaml" > /dev/null
+  fi
 
   # ---- bookmarks.yaml ----
   log "  Writing $CONFIG_DIR/bookmarks.yaml ..."
@@ -686,7 +738,10 @@ main() {
   log "==> Configure apps: Gitea + OpenWebUI + pi (ollama-pi-agent) + Homepage"
   resolve_ctids
   selected gitea     && configure_gitea
-  selected openwebui && configure_openwebui
+  # configure_openwebui only runs if (a) selected and (b) the CT actually
+  # exists. Bootstrap-pve.sh's --skip-openwebui makes the CT optional, so
+  # we silently skip the config rather than fail when the CT is absent.
+  selected openwebui && [[ -n "$OPENWEBUI_CTID" ]] && configure_openwebui
   selected pi        && configure_pi_host
   selected homepage  && configure_homepage
   write_summary
