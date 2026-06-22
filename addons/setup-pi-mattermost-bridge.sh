@@ -131,13 +131,18 @@ if os.path.exists(sp):
     with open(sp) as f:
         data = json.load(f)
     pkgs = data.get(\"packages\", [])
-    pkg = \"@whonixnetworks/pi-mattermost\"
-    if pkg in pkgs:
-        pkgs.remove(pkg)
+    # Remove both the canonical (npm:-prefixed) and any stale bare form
+    removed = []
+    for pkg in (\"npm:@whonixnetworks/pi-mattermost\", \"@whonixnetworks/pi-mattermost\"):
+        if pkg in pkgs:
+            pkgs.remove(pkg)
+            removed.append(pkg)
+    if removed:
         data[\"packages\"] = pkgs
         with open(sp, \"w\") as f:
             json.dump(data, f, indent=2)
-        print(\"  Removed\", pkg, \"from pi settings.json.\")
+        for pkg in removed:
+            print(\"  Removed\", pkg, \"from pi settings.json.\")
 " 2>/dev/null || true'
   fi
 
@@ -270,7 +275,13 @@ fi
 # Equivalent CLI command: `pi install npm:@whonixnetworks/pi-mattermost`.
 # We do the JSON edit directly so we don't (re)trigger pi install's own
 # npm step (which could wipe our patches).
-log "Registering @whonixnetworks/pi-mattermost in /root/.pi/agent/settings.json..."
+# Pi requires a SOURCE-TYPE PREFIX on package identifiers — "npm:" for npm,
+# "git:" for git URLs, etc. Without the prefix, `pi list` shows the entry but
+# can't resolve it to a path on disk, and pi silently fails to load the
+# extension at startup. Earlier revisions of this script added a bare
+# "@whonixnetworks/pi-mattermost" (no prefix). We now use the correct
+# prefixed form AND strip any stale bare entry from prior runs.
+log "Registering npm:@whonixnetworks/pi-mattermost in /root/.pi/agent/settings.json..."
 if (( ! DRY_RUN )); then
 pct exec "$PI_CTID" -- bash -lc 'python3 -c "
 import json, os
@@ -281,19 +292,26 @@ if os.path.exists(sp):
         with open(sp) as f:
             data = json.load(f)
     except json.JSONDecodeError:
-        # If the file is corrupt, start fresh (preserves a backup)
         os.rename(sp, sp + \".bak\")
         data = {}
 pkgs = data.setdefault(\"packages\", [])
-pkg = \"@whonixnetworks/pi-mattermost\"
-if pkg not in pkgs:
-    pkgs.append(pkg)
+canonical = \"npm:@whonixnetworks/pi-mattermost\"
+legacy = \"@whonixnetworks/pi-mattermost\"
+changed = False
+if legacy in pkgs:
+    pkgs.remove(legacy)
+    changed = True
+    print(\"  Removed stale bare entry (no npm: prefix).\")
+if canonical not in pkgs:
+    pkgs.append(canonical)
+    changed = True
+    print(\"  Added\", canonical, \"to packages list.\")
+else:
+    print(\"  Already registered correctly.\")
+if changed:
     os.makedirs(os.path.dirname(sp), exist_ok=True)
     with open(sp, \"w\") as f:
         json.dump(data, f, indent=2)
-    print(\"  Added\", pkg, \"to packages list.\")
-else:
-    print(\"  Already in packages list — no change.\")
 "'
 fi
 
