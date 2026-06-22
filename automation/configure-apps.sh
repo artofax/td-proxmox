@@ -111,8 +111,24 @@ command -v pct >/dev/null || die "pct not found — run this on the PVE host."
 # interactively. Password + OpenRouter key prompts hide input. Same pattern
 # as bootstrap-pve.sh — see resolve_sshkey / resolve_tsauthkey there.
 
+# Helper: read a KEY=value pair from /root/td-tokens.txt. Used by each
+# resolve_* to populate from a prior run before falling back to a prompt.
+# Lets users re-run configure-apps.sh (or --only X) without re-entering
+# every credential.
+_read_token_field() {
+  local key="$1"
+  [[ -f "$TOKENS_FILE" ]] || return 1
+  awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, "", $0); print; exit }' "$TOKENS_FILE"
+}
+
 resolve_admin_user() {
   if [[ -n "$ADMIN_USER" ]]; then return; fi
+  # Prefer existing td-tokens.txt value over re-prompting
+  ADMIN_USER="$(_read_token_field ADMIN_USER 2>/dev/null || true)"
+  if [[ -n "$ADMIN_USER" ]]; then
+    log "Reusing ADMIN_USER='$ADMIN_USER' from $TOKENS_FILE."
+    return
+  fi
   if (( DRY_RUN )); then ADMIN_USER="dryrunuser"; log "Dry-run: using placeholder admin user."; return; fi
   printf "\n\033[1;36m[configure-apps]\033[0m Admin username for Gitea + OpenWebUI (e.g. td): " >&2
   IFS= read -r ADMIN_USER
@@ -121,6 +137,11 @@ resolve_admin_user() {
 
 resolve_admin_email() {
   if [[ -n "$ADMIN_EMAIL" ]]; then return; fi
+  ADMIN_EMAIL="$(_read_token_field ADMIN_EMAIL 2>/dev/null || true)"
+  if [[ -n "$ADMIN_EMAIL" ]]; then
+    log "Reusing ADMIN_EMAIL='$ADMIN_EMAIL' from $TOKENS_FILE."
+    return
+  fi
   if (( DRY_RUN )); then ADMIN_EMAIL="dry@run.local"; log "Dry-run: using placeholder admin email."; return; fi
   printf "\n\033[1;36m[configure-apps]\033[0m Admin email (e.g. td@homelab.local): " >&2
   IFS= read -r ADMIN_EMAIL
@@ -130,18 +151,21 @@ resolve_admin_email() {
 
 resolve_admin_password() {
   if [[ -n "$ADMIN_PASSWORD" ]]; then
-    # When --admin-password was passed via flag, still validate length so
-    # downstream filebrowser doesn't barf later. 12 chars is filebrowser's
-    # hardcoded minimum since recent versions.
     [[ ${#ADMIN_PASSWORD} -ge 12 ]] \
       || die "Admin password from --admin-password is too short (need >= 12 chars to satisfy filebrowser)."
     return
   fi
+  ADMIN_PASSWORD="$(_read_token_field ADMIN_PASSWORD 2>/dev/null || true)"
+  if [[ -n "$ADMIN_PASSWORD" ]]; then
+    log "Reusing ADMIN_PASSWORD from $TOKENS_FILE (hidden)."
+    # Still validate — if td-tokens.txt has an < 12 char password from a
+    # pre-bump install, fail clearly rather than letting filebrowser barf.
+    [[ ${#ADMIN_PASSWORD} -ge 12 ]] \
+      || die "ADMIN_PASSWORD in $TOKENS_FILE is < 12 chars. Rotate it (Mattermost/Gitea/OpenWebUI UIs) to a 12+ char value, edit $TOKENS_FILE, then re-run."
+    return
+  fi
   if (( DRY_RUN )); then ADMIN_PASSWORD="dryrun-placeholder-pw-12"; log "Dry-run: using placeholder admin password."; return; fi
   local pw1 pw2
-  # 12 char minimum is dictated by filebrowser (the most strict of the
-  # services we configure). Gitea/OpenWebUI accept anything 8+, but enforcing
-  # one number everywhere means a single password works across all four.
   printf "\n\033[1;36m[configure-apps]\033[0m Admin password (hidden; min 12 chars — filebrowser's requirement): " >&2
   IFS= read -rs pw1; echo >&2
   printf "Confirm: " >&2
@@ -153,6 +177,11 @@ resolve_admin_password() {
 
 resolve_openrouter_key() {
   if [[ -n "$OPENROUTER_KEY" ]]; then return; fi
+  OPENROUTER_KEY="$(_read_token_field OPENROUTER_API_KEY 2>/dev/null || true)"
+  if [[ -n "$OPENROUTER_KEY" ]]; then
+    log "Reusing OPENROUTER_API_KEY from $TOKENS_FILE (hidden)."
+    return
+  fi
   if (( DRY_RUN )); then OPENROUTER_KEY="sk-or-DRY_RUN_PLACEHOLDER"; log "Dry-run: using placeholder OpenRouter key."; return; fi
   printf "\n\033[1;36m[configure-apps]\033[0m OpenRouter API key (sk-or-... from openrouter.ai → Keys). Input hidden:\n> " >&2
   IFS= read -rs OPENROUTER_KEY
@@ -834,7 +863,11 @@ register_homepage_tile \"docker-<app>\" \"Sandbox\" \"<App Name>\" \\
   else
     run "pct exec $PI_HOST_CTID -- mkdir -p /root/.pi/agent"
     printf '%s\n' "$AGENTS_MD" | pct exec "$PI_HOST_CTID" -- tee /root/.pi/agent/AGENTS.md >/dev/null
-    log "    Wrote $(pct exec "$PI_HOST_CTID" -- wc -l < /root/.pi/agent/AGENTS.md) lines."
+    # wc -l: the '<' redirect would be interpreted by the LOCAL shell, not
+    # by pct exec — reading from PVE's filesystem instead of the CT's. Pass
+    # the path as an argument so wc reads it inside the CT, then strip the
+    # trailing filename with awk to leave just the line count.
+    log "    Wrote $(pct exec "$PI_HOST_CTID" -- wc -l /root/.pi/agent/AGENTS.md | awk '{print $1}') lines."
   fi
 
   log "  Done. pi will pick up the new context on next launch."
@@ -1190,24 +1223,91 @@ configure_filebrowser() {
 # ----- final summary ---------------------------------------------------------
 write_summary() {
   local now; now="$(date -Iseconds)"
+
+  # Read existing td-tokens.txt into an associative array. Lets us PRESERVE
+  # values for subsystems that didn't run this invocation (--only X) instead
+  # of overwriting them with <placeholder> strings. Critically important so
+  # that setup-mattermost.sh's MATTERMOST_* lines survive a configure-apps.sh
+  # --only pi re-run.
+  declare -A existing
+  if [[ -f "$TOKENS_FILE" ]]; then
+    while IFS='=' read -r k v; do
+      [[ -z "$k" || "${k:0:1}" == "#" ]] && continue
+      existing["$k"]="$v"
+    done < "$TOKENS_FILE"
+  fi
+
+  # Merge logic per field: prefer this-run's value if set, fall back to
+  # existing td-tokens.txt value, then a clearly-marked placeholder.
+  local m_admin_user="${ADMIN_USER:-${existing[ADMIN_USER]:-}}"
+  local m_admin_email="${ADMIN_EMAIL:-${existing[ADMIN_EMAIL]:-}}"
+  local m_admin_password="${ADMIN_PASSWORD:-${existing[ADMIN_PASSWORD]:-}}"
+
+  local m_gitea_url
+  if [[ -n "${GITEA_IP:-}" ]]; then
+    m_gitea_url="http://${GITEA_IP}:3000"
+  else
+    m_gitea_url="${existing[GITEA_URL]:-http://<gitea-ip>:3000}"
+  fi
+  local m_gitea_token="${GITEA_TOKEN:-${existing[GITEA_TOKEN]:-<not-generated>}}"
+
+  local m_owui_url
+  if [[ -n "${OWUI_IP:-}" ]]; then
+    m_owui_url="http://${OWUI_IP}:8080"
+  else
+    m_owui_url="${existing[OPENWEBUI_URL]:-http://<openwebui-ip>:8080}"
+  fi
+
+  local m_homepage_url
+  if [[ -n "${HOMEPAGE_IP:-}" ]]; then
+    m_homepage_url="http://${HOMEPAGE_IP}:3000"
+  else
+    m_homepage_url="${existing[HOMEPAGE_URL]:-http://<homepage-ip>:3000}"
+  fi
+
+  local m_openrouter="${OPENROUTER_KEY:-${existing[OPENROUTER_API_KEY]:-}}"
+
+  # Preserve any addon-added lines (e.g., MATTERMOST_*, future addons).
+  # Anything not handled in the well-known list above gets emitted verbatim
+  # at the end of the file. This is how a --only pi run keeps MATTERMOST_*
+  # entries intact even though configure-apps.sh doesn't know about them.
+  local extra_lines=""
+  for k in "${!existing[@]}"; do
+    case "$k" in
+      ADMIN_USER|ADMIN_EMAIL|ADMIN_PASSWORD| \
+      GITEA_URL|GITEA_TOKEN| \
+      OPENWEBUI_URL|HOMEPAGE_URL| \
+      OPENROUTER_API_KEY)
+        ;;  # handled above
+      *)
+        extra_lines+="$k=${existing[$k]}"$'\n'
+        ;;
+    esac
+  done
+
   local body
   body="$(cat <<EOF
 # TD-Proxmox app credentials  ($now)
 # Treat this file as secret. chmod 600.
 
-ADMIN_USER=$ADMIN_USER
-ADMIN_EMAIL=$ADMIN_EMAIL
-ADMIN_PASSWORD=$ADMIN_PASSWORD
+ADMIN_USER=$m_admin_user
+ADMIN_EMAIL=$m_admin_email
+ADMIN_PASSWORD=$m_admin_password
 
-GITEA_URL=http://${GITEA_IP:-<gitea-ip>}:3000
-GITEA_TOKEN=${GITEA_TOKEN:-<not-generated>}
+GITEA_URL=$m_gitea_url
+GITEA_TOKEN=$m_gitea_token
 
-OPENWEBUI_URL=http://${OWUI_IP:-<openwebui-ip>}:8080
-HOMEPAGE_URL=http://${HOMEPAGE_IP:-<homepage-ip>}:3000
+OPENWEBUI_URL=$m_owui_url
+HOMEPAGE_URL=$m_homepage_url
 
-OPENROUTER_API_KEY=$OPENROUTER_KEY
+OPENROUTER_API_KEY=$m_openrouter
 EOF
 )"
+
+  # Tack on preserved lines (MATTERMOST_*, etc.) if any
+  if [[ -n "$extra_lines" ]]; then
+    body+=$'\n\n'"# Addon-managed values (preserved across runs):"$'\n'"$extra_lines"
+  fi
 
   run "umask 077 && cat > '$TOKENS_FILE' <<'TOKENS'
 $body
