@@ -1,0 +1,20 @@
+--- a/dist/extension.js
++++ b/dist/extension.js
+@@ -314,6 +314,7 @@
+             const res = await bridgeFetch("/api/register-session", {
+                 projectPath,
+                 sessionId,
++                display_name: projectPath.split("/").filter(Boolean).pop() || projectPath,
+             });
+             if (!res.ok) {
+                 console.error(`[pi-matter] auto-connect failed: status ${res.status}`);
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -378,6 +378,7 @@
+ 			const res = await bridgeFetch("/api/register-session", {
+ 				projectPath,
+ 				sessionId,
++				display_name: projectPath.split("/").filter(Boolean).pop() || projectPath,
+ 			});
+ 			if (!res.ok) {
+ 				console.error(`[pi-matter] auto-connect failed: status ${res.status}`);
