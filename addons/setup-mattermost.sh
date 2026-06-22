@@ -191,26 +191,54 @@ if [[ -z "$ADMIN_PASSWORD" ]]; then
   fi
 fi
 
-if [[ -z "$TS_AUTHKEY" ]] && (( ! SKIP_TAILSCALE )); then
-  # Try to reuse from .vars (bootstrap-pve.sh writes it) before prompting.
-  if [[ -f /etc/td-proxmox/.vars ]]; then
-    TS_AUTHKEY="$(awk -F= '/^TS_AUTHKEY=/{sub(/^[^=]*=/,"",$0); print; exit}' /etc/td-proxmox/.vars 2>/dev/null | tr -d '"' || true)"
-  fi
-  if [[ -z "$TS_AUTHKEY" ]] && (( ! DRY_RUN )); then
-    printf "\n\033[1;36m[setup-mattermost]\033[0m Tailscale auth key (https://login.tailscale.com/admin/settings/keys): " >&2
-    IFS= read -rs TS_AUTHKEY; echo >&2
-    [[ -n "$TS_AUTHKEY" ]] || die "Tailscale auth key required (or pass --skip-tailscale)."
-  fi
-  (( DRY_RUN )) && [[ -z "$TS_AUTHKEY" ]] && TS_AUTHKEY="tskey-DRYRUN"
-fi
+# TS_AUTHKEY and CT_PASSWORD are ONLY needed when creating a fresh CT.
+# When EXISTING_CT=1 we're re-running just the API auto-config phase against
+# an already-up CT — skip these prompts entirely. Saves a re-prompt every
+# time the user iterates on the auto-config side of things.
+if (( ! EXISTING_CT )); then
 
-if [[ -z "$CT_PASSWORD" ]]; then
-  if (( DRY_RUN )); then CT_PASSWORD="dryrun-ct-pw"; else
-    printf "\n\033[1;36m[setup-mattermost]\033[0m CT root password (for console fallback): " >&2
-    IFS= read -rs CT_PASSWORD; echo >&2
-    [[ -n "$CT_PASSWORD" ]] || die "CT password required."
+  if [[ -z "$TS_AUTHKEY" ]] && (( ! SKIP_TAILSCALE )); then
+    # Resolution order, most-specific first:
+    #   1. /root/td-tokens.txt   (cached from a prior addon run — preferred)
+    #   2. /etc/td-proxmox/.vars (bootstrap-pve.sh writes it on initial build)
+    #   3. interactive prompt
+    TS_AUTHKEY="$(read_from_tokens TS_AUTHKEY 2>/dev/null || true)"
+    if [[ -n "$TS_AUTHKEY" ]]; then
+      log "Reusing TS_AUTHKEY from $TOKENS_FILE."
+    elif [[ -f /etc/td-proxmox/.vars ]]; then
+      TS_AUTHKEY="$(awk -F= '/^TS_AUTHKEY=/{sub(/^[^=]*=/,"",$0); print; exit}' /etc/td-proxmox/.vars 2>/dev/null | tr -d '"' || true)"
+      [[ -n "$TS_AUTHKEY" ]] && log "Reusing TS_AUTHKEY from /etc/td-proxmox/.vars."
+    fi
+    if [[ -z "$TS_AUTHKEY" ]] && (( ! DRY_RUN )); then
+      printf "\n\033[1;36m[setup-mattermost]\033[0m Tailscale auth key (https://login.tailscale.com/admin/settings/keys; must be REUSABLE): " >&2
+      IFS= read -rs TS_AUTHKEY; echo >&2
+      [[ -n "$TS_AUTHKEY" ]] || die "Tailscale auth key required (or pass --skip-tailscale)."
+    fi
+    (( DRY_RUN )) && [[ -z "$TS_AUTHKEY" ]] && TS_AUTHKEY="tskey-DRYRUN"
+
+    # Cache the key in td-tokens.txt for future addon runs (other addons
+    # that create CTs — setup-new-pi-agent.sh, hypothetical future ones —
+    # can read from the same place). Skip the cache write on dry-run or
+    # if td-tokens.txt doesn't exist yet (first-ever bootstrap path).
+    if (( ! DRY_RUN )) && [[ -f "$TOKENS_FILE" && "$TS_AUTHKEY" != "tskey-DRYRUN" ]]; then
+      # Strip any prior TS_AUTHKEY line first so re-runs stay canonical
+      if grep -q "^TS_AUTHKEY=" "$TOKENS_FILE"; then
+        sed -i '/^TS_AUTHKEY=/d' "$TOKENS_FILE"
+      fi
+      echo "TS_AUTHKEY=$TS_AUTHKEY" >> "$TOKENS_FILE"
+      log "Cached TS_AUTHKEY in $TOKENS_FILE for future addon runs."
+    fi
   fi
-fi
+
+  if [[ -z "$CT_PASSWORD" ]]; then
+    if (( DRY_RUN )); then CT_PASSWORD="dryrun-ct-pw"; else
+      printf "\n\033[1;36m[setup-mattermost]\033[0m CT root password (for console fallback): " >&2
+      IFS= read -rs CT_PASSWORD; echo >&2
+      [[ -n "$CT_PASSWORD" ]] || die "CT password required."
+    fi
+  fi
+
+fi  # ! EXISTING_CT
 
 # ----- resolve workstation SSH key for the new CT --------------------------
 SSH_KEY=""
