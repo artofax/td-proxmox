@@ -119,18 +119,36 @@ read_from_tokens() {
   awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, "", $0); print; exit }' "$TOKENS_FILE"
 }
 
-# ----- pre-flight: hostname/CTID conflict -----------------------------------
-if find_ct_by_hostname "$HOSTNAME" >/dev/null 2>&1; then
-  die "A CT with hostname '$HOSTNAME' already exists. Pass --hostname <other> or remove the existing one first."
-fi
-
-if [[ -z "$CTID" ]]; then
-  CTID="$(pvesh get /cluster/nextid 2>/dev/null | tr -d '"')"
-  [[ -n "$CTID" ]] || die "Couldn't auto-allocate CTID via 'pvesh get /cluster/nextid'."
-  log "Auto-allocated CTID: $CTID"
-fi
-if pct status "$CTID" >/dev/null 2>&1; then
-  die "CTID $CTID is already in use. Choose a different --ctid."
+# ----- pre-flight: detect existing CT (skip create) or allocate new --------
+# The script is idempotent at the API-config level. If the CT already exists
+# we re-run just the auto-config phase against it (admin/team/bot/token/
+# Homepage tile/td-tokens.txt). That handles all the partial-success cases
+# where the CT got created but the post-config didn't complete.
+EXISTING_CT=0
+EXISTING_CTID="$(find_ct_by_hostname "$HOSTNAME" 2>/dev/null || true)"
+if [[ -n "$EXISTING_CTID" ]]; then
+  EXISTING_CT=1
+  CTID="$EXISTING_CTID"
+  log "================================================================"
+  log "Existing CT detected: $CTID ($HOSTNAME)"
+  log "Skipping community-scripts install + Tailscale + key push."
+  log "Re-running API auto-config phase (admin/team/bot/token/tile)."
+  log "If you want a fresh install instead, destroy first:"
+  log "  pct stop $CTID && pct destroy $CTID --purge"
+  log "================================================================"
+  # Verify it's actually running before we depend on it
+  pct status "$CTID" 2>/dev/null | grep -q "status: running" \
+    || die "CT $CTID ($HOSTNAME) exists but isn't running. Start it: pct start $CTID"
+else
+  # Fresh install path — allocate CTID if not provided
+  if [[ -z "$CTID" ]]; then
+    CTID="$(pvesh get /cluster/nextid 2>/dev/null | tr -d '"')"
+    [[ -n "$CTID" ]] || die "Couldn't auto-allocate CTID via 'pvesh get /cluster/nextid'."
+    log "Auto-allocated CTID: $CTID"
+  fi
+  if pct status "$CTID" >/dev/null 2>&1; then
+    die "CTID $CTID is already in use by a different CT. Choose a different --ctid."
+  fi
 fi
 
 # ----- resolve credentials --------------------------------------------------
@@ -215,75 +233,82 @@ log "  Tailscale:      $((( SKIP_TAILSCALE )) && echo skipped || echo yes (joini
 log "  Homepage tile:  $((( SKIP_HOMEPAGE_TILE )) && echo skipped || echo registered)"
 log "================================================================"
 
-# ----- run the community-scripts helper -------------------------------------
-log "Running community-scripts mattermost.sh helper (creates CT, installs Mattermost)..."
-log "  Pick 'Default Install' in the whiptail menu when it appears."
+# ----- CT-creation phase (skipped when EXISTING_CT=1) ----------------------
+# Everything in this section is one-shot CT setup. If the CT already exists,
+# we assume it's working (port test below catches the case where Mattermost
+# is broken) and jump straight to the auto-config phase.
+if (( ! EXISTING_CT )); then
+  log "Running community-scripts mattermost.sh helper (creates CT, installs Mattermost)..."
+  log "  Pick 'Default Install' in the whiptail menu when it appears."
 
-# Same env-var pattern bootstrap-pve.sh uses. var_hostname pins the CT name,
-# var_ssh + var_ssh_authorized_key seed our workstation key during CT creation,
-# var_gpu=no skips any GPU prompts.
-run "var_ctid=$CTID \
-     var_hostname=$HOSTNAME \
-     var_cpu=$CPU \
-     var_ram=$RAM \
-     var_disk=$DISK \
-     var_ssh=yes \
-     var_ssh_authorized_key='$SSH_KEY' \
-     var_gpu=no \
-     bash -c \"\$(curl -fsSL '$MM_HELPER_URL')\""
+  # Same env-var pattern bootstrap-pve.sh uses. var_hostname pins the CT name,
+  # var_ssh + var_ssh_authorized_key seed our workstation key during CT creation,
+  # var_gpu=no skips any GPU prompts.
+  run "var_ctid=$CTID \
+       var_hostname=$HOSTNAME \
+       var_cpu=$CPU \
+       var_ram=$RAM \
+       var_disk=$DISK \
+       var_ssh=yes \
+       var_ssh_authorized_key='$SSH_KEY' \
+       var_gpu=no \
+       bash -c \"\$(curl -fsSL '$MM_HELPER_URL')\""
 
-# The community helper may have used a different CTID if ours was taken.
-# Detect the actual one by hostname before continuing.
-if (( ! DRY_RUN )); then
-  ACTUAL_CTID="$(find_ct_by_hostname "$HOSTNAME" 2>/dev/null || true)"
-  if [[ -n "$ACTUAL_CTID" && "$ACTUAL_CTID" != "$CTID" ]]; then
-    log "  Helper assigned CTID $ACTUAL_CTID (not our preferred $CTID) — switching."
-    CTID="$ACTUAL_CTID"
+  # The community helper may have used a different CTID if ours was taken.
+  # Detect the actual one by hostname before continuing.
+  if (( ! DRY_RUN )); then
+    ACTUAL_CTID="$(find_ct_by_hostname "$HOSTNAME" 2>/dev/null || true)"
+    if [[ -n "$ACTUAL_CTID" && "$ACTUAL_CTID" != "$CTID" ]]; then
+      log "  Helper assigned CTID $ACTUAL_CTID (not our preferred $CTID) — switching."
+      CTID="$ACTUAL_CTID"
+    fi
   fi
-fi
 
-[[ -n "$CTID" ]] || die "Mattermost CT didn't come up — check the community helper output above."
+  [[ -n "$CTID" ]] || die "Mattermost CT didn't come up — check the community helper output above."
 
-# ----- TUN passthrough (only matters if Tailscale will be joined) ----------
-if (( ! SKIP_TAILSCALE )); then
-  log "Adding /dev/net/tun passthrough so Tailscale can run..."
-  CT_CONF="/etc/pve/lxc/$CTID.conf"
-  if (( ! DRY_RUN )) && ! grep -q "/dev/net/tun" "$CT_CONF" 2>/dev/null; then
-    cat >> "$CT_CONF" <<'TUN_BLOCK'
+  # ----- TUN passthrough (only matters if Tailscale will be joined) ----------
+  if (( ! SKIP_TAILSCALE )); then
+    log "Adding /dev/net/tun passthrough so Tailscale can run..."
+    CT_CONF="/etc/pve/lxc/$CTID.conf"
+    if (( ! DRY_RUN )) && ! grep -q "/dev/net/tun" "$CT_CONF" 2>/dev/null; then
+      cat >> "$CT_CONF" <<'TUN_BLOCK'
 lxc.cgroup2.devices.allow: c 10:200 rwm
 lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 TUN_BLOCK
-    # Reboot so the mount takes effect.
-    run "pct reboot $CTID"
-    log "Waiting for CT to come back after reboot..."
-    sleep 8
-    for i in {1..30}; do
-      pct exec "$CTID" -- ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && break
-      sleep 2
-    done
+      # Reboot so the mount takes effect.
+      run "pct reboot $CTID"
+      log "Waiting for CT to come back after reboot..."
+      sleep 8
+      for i in {1..30}; do
+        pct exec "$CTID" -- ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && break
+        sleep 2
+      done
+    fi
   fi
-fi
 
-# ----- Tailscale join ------------------------------------------------------
-if (( ! SKIP_TAILSCALE )); then
-  log "Installing Tailscale + joining tailnet as '$HOSTNAME'..."
-  run "pct exec $CTID -- bash -lc 'apt-get update -qq && apt-get install -y -qq curl ca-certificates'"
-  run "pct exec $CTID -- bash -lc 'curl -fsSL https://tailscale.com/install.sh | sh'"
-  run "pct exec $CTID -- tailscale up --reset --authkey '$TS_AUTHKEY' --hostname '$HOSTNAME' --accept-routes --accept-dns"
+  # ----- Tailscale join ----------------------------------------------------
+  if (( ! SKIP_TAILSCALE )); then
+    log "Installing Tailscale + joining tailnet as '$HOSTNAME'..."
+    run "pct exec $CTID -- bash -lc 'apt-get update -qq && apt-get install -y -qq curl ca-certificates'"
+    run "pct exec $CTID -- bash -lc 'curl -fsSL https://tailscale.com/install.sh | sh'"
+    run "pct exec $CTID -- tailscale up --reset --authkey '$TS_AUTHKEY' --hostname '$HOSTNAME' --accept-routes --accept-dns"
 
-  log "Waiting for Tailscale to reach Running..."
-  if (( ! DRY_RUN )); then
-    for i in {1..20}; do
-      pct exec "$CTID" -- tailscale status >/dev/null 2>&1 && break
-      sleep 2
-    done
+    log "Waiting for Tailscale to reach Running..."
+    if (( ! DRY_RUN )); then
+      for i in {1..20}; do
+        pct exec "$CTID" -- tailscale status >/dev/null 2>&1 && break
+        sleep 2
+      done
+    fi
   fi
-fi
 
-# ----- ensure workstation SSH keys are in /root/.ssh/authorized_keys --------
-log "Pushing PVE host's authorized_keys to the new CT..."
-run "pct push $CTID /root/.ssh/authorized_keys /root/.ssh/authorized_keys --perms 0600"
-run "pct exec $CTID -- chown root:root /root/.ssh/authorized_keys"
+  # ----- ensure workstation SSH keys are in /root/.ssh/authorized_keys -----
+  log "Pushing PVE host's authorized_keys to the new CT..."
+  run "pct push $CTID /root/.ssh/authorized_keys /root/.ssh/authorized_keys --perms 0600"
+  run "pct exec $CTID -- chown root:root /root/.ssh/authorized_keys"
+else
+  log "Skipping CT creation steps (existing CT mode)."
+fi
 
 # ----- wait for Mattermost to be reachable ---------------------------------
 log "Waiting for Mattermost to come up on port 8065..."
