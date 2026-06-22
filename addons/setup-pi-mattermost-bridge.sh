@@ -140,16 +140,22 @@ log "  Node bin:  $NODE_BIN"
 PKG_DIR="/root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost"
 
 # ----- 1. install (or update) the bridge via pi's npm --------------------
+# npm's shebang is '#!/usr/bin/env node'. Invoking $NPM_BIN directly makes
+# /usr/bin/env look for 'node' on $PATH inside the CT — which fails unless
+# pi-node's bin is on PATH. Wrap the call in 'bash -lc' so /etc/profile.d
+# and /etc/bash.bashrc add pi-node to PATH first (set up by setup-ollama-pi.sh).
 log "Installing @whonixnetworks/pi-mattermost via pi's npm..."
 if (( ! DRY_RUN )); then
   if pct exec "$PI_CTID" -- test -d "$PKG_DIR"; then
     log "  Already installed at $PKG_DIR. Skipping npm install."
-    log "  (Use 'pct exec $PI_CTID -- $NPM_BIN install -g @whonixnetworks/pi-mattermost@latest' to bump.)"
+    log "  (To bump: pct exec $PI_CTID -- bash -lc 'PATH=$NODE_BIN_DIR:\$PATH npm install -g @whonixnetworks/pi-mattermost@latest')"
   else
-    run "pct exec $PI_CTID -- $NPM_BIN install -g @whonixnetworks/pi-mattermost"
+    # Explicit PATH prefix as a belt-and-suspenders — works even if the
+    # profile.d drop-in isn't picked up by this particular pct exec context.
+    run "pct exec $PI_CTID -- bash -lc 'PATH=\"$NODE_BIN_DIR:\$PATH\" npm install -g @whonixnetworks/pi-mattermost'"
   fi
 else
-  printf '[dry-run] would run: pct exec %s -- %s install -g @whonixnetworks/pi-mattermost\n' "$PI_CTID" "$NPM_BIN"
+  printf '[dry-run] would run: pct exec %s -- bash -lc \"PATH=%s:\$PATH npm install -g @whonixnetworks/pi-mattermost\"\n' "$PI_CTID" "$NODE_BIN_DIR"
 fi
 
 # ----- 2. push + apply our patches ---------------------------------------
