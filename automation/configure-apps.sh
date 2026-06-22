@@ -587,22 +587,41 @@ chmod 600 /root/.netrc'"
       echo \"export OPENROUTER_API_KEY=$OPENROUTER_KEY\" >> /root/.bashrc
   '"
 
-  # 2b. If setup-mattermost.sh has been run, also export the bot token +
-  # bot channel id so pi can post status updates with one curl call. The
-  # addon writes these to /root/td-tokens.txt; we re-export to /root/.bashrc
-  # on the pi host so they show up as environment variables. Idempotent —
-  # each grep gates an append.
-  local MM_BOT_TOKEN_LOCAL MM_BOT_CHANNEL_LOCAL
+  # 2b. If setup-mattermost.sh has been run, export ALL Mattermost vars to
+  # ollama-pi-agent's /root/.bashrc. /root/td-tokens.txt is on the PVE HOST,
+  # not the pi host — pi never sees it. So everything pi needs to talk to
+  # Mattermost has to be in its own .bashrc as env vars.
+  #
+  # We export the full set so pi can:
+  #   - Post to the default #bot channel (BOT_TOKEN + BOT_CHANNEL_ID)
+  #   - Look up other channels by name (TEAM_ID, BOT_TOKEN)
+  #   - Add the bot to additional channels (BOT_USER_ID for the POST body)
+  #   - Hit Mattermost over MagicDNS (URL — currently we hardcode http://mattermost
+  #     in the AGENTS.md example but exposing it as a var future-proofs custom hosts)
+  local MM_BOT_TOKEN_LOCAL MM_BOT_CHANNEL_LOCAL MM_TEAM_ID_LOCAL MM_BOT_USER_ID_LOCAL MM_URL_LOCAL
   MM_BOT_TOKEN_LOCAL="$(awk -F= '/^MATTERMOST_BOT_TOKEN=/{sub(/^[^=]*=/,"",$0); print; exit}' "$TOKENS_FILE" 2>/dev/null || true)"
   MM_BOT_CHANNEL_LOCAL="$(awk -F= '/^MATTERMOST_BOT_CHANNEL_ID=/{sub(/^[^=]*=/,"",$0); print; exit}' "$TOKENS_FILE" 2>/dev/null || true)"
+  MM_TEAM_ID_LOCAL="$(awk -F= '/^MATTERMOST_TEAM_ID=/{sub(/^[^=]*=/,"",$0); print; exit}' "$TOKENS_FILE" 2>/dev/null || true)"
+  MM_BOT_USER_ID_LOCAL="$(awk -F= '/^MATTERMOST_BOT_USER_ID=/{sub(/^[^=]*=/,"",$0); print; exit}' "$TOKENS_FILE" 2>/dev/null || true)"
+  MM_URL_LOCAL="$(awk -F= '/^MATTERMOST_URL=/{sub(/^[^=]*=/,"",$0); print; exit}' "$TOKENS_FILE" 2>/dev/null || true)"
+  # Default URL to the MagicDNS hostname if td-tokens.txt only stored the IP form
+  [[ -z "$MM_URL_LOCAL" ]] && MM_URL_LOCAL="http://mattermost:8065"
+
   if [[ -n "$MM_BOT_TOKEN_LOCAL" ]]; then
-    log "  Exporting MATTERMOST_BOT_TOKEN + MATTERMOST_BOT_CHANNEL_ID in /root/.bashrc..."
+    log "  Exporting Mattermost env vars to /root/.bashrc on ollama-pi-agent..."
+    # Helper: append-if-not-already-there for each var. The first
+    # 'grep -q' gates the echo append so re-runs don't duplicate lines.
     run "pct exec $PI_HOST_CTID -- bash -c '
-      grep -q MATTERMOST_BOT_TOKEN /root/.bashrc || \
-        echo \"export MATTERMOST_BOT_TOKEN=$MM_BOT_TOKEN_LOCAL\" >> /root/.bashrc
-      grep -q MATTERMOST_BOT_CHANNEL_ID /root/.bashrc || \
-        echo \"export MATTERMOST_BOT_CHANNEL_ID=$MM_BOT_CHANNEL_LOCAL\" >> /root/.bashrc
+      add_export() { local var=\$1 val=\$2; grep -q \"^export \$var=\" /root/.bashrc || echo \"export \$var=\$val\" >> /root/.bashrc; }
+      add_export MATTERMOST_URL              \"$MM_URL_LOCAL\"
+      add_export MATTERMOST_BOT_TOKEN        \"$MM_BOT_TOKEN_LOCAL\"
+      add_export MATTERMOST_BOT_CHANNEL_ID   \"$MM_BOT_CHANNEL_LOCAL\"
+      add_export MATTERMOST_TEAM_ID          \"$MM_TEAM_ID_LOCAL\"
+      add_export MATTERMOST_BOT_USER_ID      \"$MM_BOT_USER_ID_LOCAL\"
     '"
+  else
+    log "  No MATTERMOST_BOT_TOKEN found in $TOKENS_FILE — skipping Mattermost env-var export."
+    log "  (Run ./addons/setup-mattermost.sh first if you want pi to be able to post to Mattermost.)"
   fi
 
   # 3. Seed pi's global AGENTS.md with the homelab topology.
@@ -707,48 +726,67 @@ to have them locally for builds.
     AGENTS_MD+="
 ## Posting to Mattermost programmatically
 
-Mattermost is reachable at \`http://mattermost:8065\`. A dedicated bot
-account named \`pi-bot\` exists with its own access token + a dedicated
-\`#bot\` channel in the TD Homelab team. Both are already exported as
-environment variables in \`/root/.bashrc\`:
+Mattermost is reachable at \`\$MATTERMOST_URL\` (defaults to
+\`http://mattermost:8065\`). A dedicated bot account named \`pi-bot\` has
+its own access token and a \`#bot\` channel in the TD Homelab team.
+**Everything pi needs is exported as environment variables** in
+\`/root/.bashrc\` on this host:
 
-- \`\$MATTERMOST_BOT_TOKEN\` — the bot's personal access token
-- \`\$MATTERMOST_BOT_CHANNEL_ID\` — the id of the \`#bot\` channel
+| Variable | What it is |
+|---|---|
+| \`\$MATTERMOST_URL\` | Base URL (e.g. http://mattermost:8065) |
+| \`\$MATTERMOST_BOT_TOKEN\` | The bot's personal access token |
+| \`\$MATTERMOST_BOT_CHANNEL_ID\` | id of the \`#bot\` channel |
+| \`\$MATTERMOST_TEAM_ID\` | id of the TD Homelab team |
+| \`\$MATTERMOST_BOT_USER_ID\` | user_id of the pi-bot account |
 
-**Post a message** (default channel — show status updates, build results,
-job completion pings):
+**First — verify the env is populated.** If you don't see all five vars
+filled in below, the chain didn't complete; tell the user to re-run
+\`./automation/configure-apps.sh --only pi\` on the PVE host:
 
 \`\`\`bash
-curl -sS -X POST 'http://mattermost:8065/api/v4/posts' \\
+env | grep -E '^MATTERMOST_'
+\`\`\`
+
+**Post a message to \`#bot\`** (default channel — status updates,
+build results, job completion pings):
+
+\`\`\`bash
+curl -sS -X POST \"\$MATTERMOST_URL/api/v4/posts\" \\
   -H \"Authorization: Bearer \$MATTERMOST_BOT_TOKEN\" \\
   -H 'Content-Type: application/json' \\
   -d \"{\\\"channel_id\\\":\\\"\$MATTERMOST_BOT_CHANNEL_ID\\\",\\\"message\\\":\\\"hello from pi\\\"}\"
 \`\`\`
 
-**Post to a different channel** (look up id first by name):
+**Post to a different channel** (look up id by name first):
 
 \`\`\`bash
-# Look up town-square id for the default team
-TEAM_ID=\$(awk -F= '/^MATTERMOST_TEAM_ID=/{print \$2}' /root/td-tokens.txt)
 CHANNEL_ID=\$(curl -sS -H \"Authorization: Bearer \$MATTERMOST_BOT_TOKEN\" \\
-  \"http://mattermost:8065/api/v4/teams/\$TEAM_ID/channels/name/town-square\" \\
+  \"\$MATTERMOST_URL/api/v4/teams/\$MATTERMOST_TEAM_ID/channels/name/town-square\" \\
   | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"id\"])')
 
-# Then post the same way
-curl -sS -X POST 'http://mattermost:8065/api/v4/posts' \\
+curl -sS -X POST \"\$MATTERMOST_URL/api/v4/posts\" \\
   -H \"Authorization: Bearer \$MATTERMOST_BOT_TOKEN\" \\
   -H 'Content-Type: application/json' \\
-  -d \"{\\\"channel_id\\\":\\\"\$CHANNEL_ID\\\",\\\"message\\\":\\\"...\\\"}\"
+  -d \"{\\\"channel_id\\\":\\\"\$CHANNEL_ID\\\",\\\"message\\\":\\\"hello\\\"}\"
 \`\`\`
 
 The bot can only post to channels it's been added to. Default it's only
-in \`#bot\` — to post elsewhere, first add it via:
-\`POST /api/v4/channels/{channel_id}/members\` with the bot's user_id
-(stored as \`MATTERMOST_BOT_USER_ID\` in \`/root/td-tokens.txt\`).
+in \`#bot\`. To post elsewhere, add it first:
 
-**Note:** \`MATTERMOST_TOKEN\` (in td-tokens.txt) is the *admin* PAT used
-by the Homepage widget. Use \`MATTERMOST_BOT_TOKEN\` for pi automation —
-distinct identity, distinct rotation lifecycle.
+\`\`\`bash
+curl -sS -X POST \"\$MATTERMOST_URL/api/v4/channels/\$CHANNEL_ID/members\" \\
+  -H \"Authorization: Bearer \$MATTERMOST_BOT_TOKEN\" \\
+  -H 'Content-Type: application/json' \\
+  -d \"{\\\"user_id\\\":\\\"\$MATTERMOST_BOT_USER_ID\\\"}\"
+\`\`\`
+
+**If env vars are missing.** Don't fabricate a token or assume the post
+succeeded — the API will respond with HTTP 401 'Invalid or expired
+session'. Tell the user the chain didn't complete and ask them to run
+\`./automation/configure-apps.sh --only pi\` from the PVE host. That
+re-reads \`/root/td-tokens.txt\` (which lives on PVE, not on this host)
+and re-exports the env vars here.
 "
   fi
   AGENTS_MD+="
