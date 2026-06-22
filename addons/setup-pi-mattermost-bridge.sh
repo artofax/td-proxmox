@@ -120,6 +120,27 @@ if (( UNINSTALL )); then
   run "pct exec $PI_CTID -- rm -f /etc/systemd/system/pi-mattermost.service"
   run "pct exec $PI_CTID -- systemctl daemon-reload"
   run "pct exec $PI_CTID -- sed -i '/PI_MATTERMOST_AUTO_CONNECT/d' /root/.bashrc"
+
+  # Also unregister the package from pi's settings.json so it doesn't try
+  # to load the (now-unconfigured) extension on next pi launch.
+  if (( ! DRY_RUN )); then
+    pct exec "$PI_CTID" -- bash -lc 'python3 -c "
+import json, os
+sp = \"/root/.pi/agent/settings.json\"
+if os.path.exists(sp):
+    with open(sp) as f:
+        data = json.load(f)
+    pkgs = data.get(\"packages\", [])
+    pkg = \"@whonixnetworks/pi-mattermost\"
+    if pkg in pkgs:
+        pkgs.remove(pkg)
+        data[\"packages\"] = pkgs
+        with open(sp, \"w\") as f:
+            json.dump(data, f, indent=2)
+        print(\"  Removed\", pkg, \"from pi settings.json.\")
+" 2>/dev/null || true'
+  fi
+
   log "Uninstalled. npm package + config + patches left in place — re-install via:"
   log "  $(basename "$0")"
   exit 0
@@ -239,6 +260,43 @@ pct exec "$PI_CTID" -- bash -lc "
 "
 fi
 
+# ----- 2b. register the package in pi's settings.json --------------------
+# Per pi.dev/docs/latest/packages: pi does NOT auto-scan node_modules. It
+# only loads extensions from packages explicitly listed in
+# ~/.pi/agent/settings.json's "packages" array. Without that registration,
+# the [Extensions] header at pi startup doesn't show our package and the
+# extension code never executes — even though it's on disk and patched.
+#
+# Equivalent CLI command: `pi install npm:@whonixnetworks/pi-mattermost`.
+# We do the JSON edit directly so we don't (re)trigger pi install's own
+# npm step (which could wipe our patches).
+log "Registering @whonixnetworks/pi-mattermost in /root/.pi/agent/settings.json..."
+if (( ! DRY_RUN )); then
+pct exec "$PI_CTID" -- bash -lc 'python3 -c "
+import json, os
+sp = \"/root/.pi/agent/settings.json\"
+data = {}
+if os.path.exists(sp):
+    try:
+        with open(sp) as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        # If the file is corrupt, start fresh (preserves a backup)
+        os.rename(sp, sp + \".bak\")
+        data = {}
+pkgs = data.setdefault(\"packages\", [])
+pkg = \"@whonixnetworks/pi-mattermost\"
+if pkg not in pkgs:
+    pkgs.append(pkg)
+    os.makedirs(os.path.dirname(sp), exist_ok=True)
+    with open(sp, \"w\") as f:
+        json.dump(data, f, indent=2)
+    print(\"  Added\", pkg, \"to packages list.\")
+else:
+    print(\"  Already in packages list — no change.\")
+"'
+fi
+
 # ----- 3. write config.toml ----------------------------------------------
 log "Writing /root/.config/pi-mattermost/config.toml..."
 run "pct exec $PI_CTID -- mkdir -p /root/.config/pi-mattermost /root/.local/share/pi-mattermost"
@@ -328,11 +386,18 @@ log "==> Done."
 log " "
 log "Bridge is now running. To use it:"
 log " "
-log "  1. Inside any pi session on ollama-pi-agent, the bridge will"
+log "  1. Restart any open pi sessions so they pick up the newly-registered"
+log "     extension. (pi reads settings.json at startup only — already-running"
+log "     sessions won't see the new package until relaunched.)"
+log " "
+log "  2. Inside any pi session on ollama-pi-agent, the bridge will"
 log "     auto-connect on session start (PI_MATTERMOST_AUTO_CONNECT=1)."
 log "     Pi posts 'Auto-connecting to Mattermost...' as confirmation."
+log "     The [Extensions] header on launch should now list both:"
+log "       @ollama/pi-web-search"
+log "       @whonixnetworks/pi-mattermost"
 log " "
-log "  2. Each connected pi session gets its own Mattermost channel —"
+log "  3. Each connected pi session gets its own Mattermost channel —"
 log "     named after the project path. Type in the channel to send to pi."
 log " "
 log "  3. To verify end-to-end:"
