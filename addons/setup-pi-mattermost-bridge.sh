@@ -192,14 +192,31 @@ for p in "$ASSETS_DIR/patches"/*.patch; do
 done
 
 log "Applying patches (skips any already applied)..."
-# Apply chain: git apply → patch -p1 → already-applied detection. Matches
-# what the user's apply-patches.sh did. We re-implement inline so the
-# script is self-contained (no dependency on the upstream pi-mattermost-setup
-# repo being cloned somewhere).
+# The patches in this repo have ABSOLUTE PATHS in their headers, e.g.:
+#   --- /tmp/package/dist/extension.js
+#   +++ /root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost/dist/extension.js
+#
+# Neither 'git apply -p1' nor 'patch -p1' can find their target files from
+# those — -p1 strips ONE component leaving 'root/.pi/agent/.../dist/...' as
+# a relative path, which doesn't exist relative to the package dir cwd.
+# git apply DOES try heuristics, but they don't work for these particular
+# absolute paths.
+#
+# Cleanest fix: rewrite each patch header to standard git-diff form
+# ('--- a/<path>' / '+++ b/<path>') before applying. Then '-p1' works
+# naturally. The original patch files in our repo stay unchanged — we
+# transform copies inside the CT.
 if (( ! DRY_RUN )); then
 pct exec "$PI_CTID" -- bash -lc "
+  # Rewrite patch headers in /tmp/pi-mm-patches/*.patch — only the path
+  # prefixes change; timestamps + context lines stay verbatim.
+  sed -i \
+    -e 's|^--- /tmp/package/|--- a/|' \
+    -e 's|^+++ /root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost/|+++ b/|' \
+    /tmp/pi-mm-patches/*.patch
+
   cd '$PKG_DIR' || exit 1
-  # Init a throwaway git repo so 'git apply' has something to operate on
+  # Init a throwaway git repo so 'git apply' has something to operate on.
   if [ ! -d .git ]; then
     git init -q && git add -A && git -c user.email=patch@local -c user.name=patch commit -q -m 'pristine' >/dev/null
   fi
@@ -213,6 +230,10 @@ pct exec "$PI_CTID" -- bash -lc "
       echo \"  ⚠ \$name already applied — skipping\"
     else
       echo \"  ✗ \$name FAILED to apply (manual fix needed at $PKG_DIR)\" >&2
+      echo \"     diagnostic — first lines of patch:\" >&2
+      head -4 \"\$patch\" | sed 's/^/       /' >&2
+      echo \"     diagnostic — git apply error:\" >&2
+      git apply --check \"\$patch\" 2>&1 | sed 's/^/       /' >&2 || true
     fi
   done
 "
