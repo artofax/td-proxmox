@@ -1,0 +1,39 @@
+--- /tmp/package/src/extension.ts	1985-10-26 08:15:00.000000000 +0000
++++ /root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost/src/extension.ts	2026-06-18 22:36:40.424691669 +0000
+@@ -372,6 +372,36 @@
+ 		},
+ 	});
+ 
++	// ─── Auto-connect on session start ────────────────────────────────────
++	const autoConnect = process.env.PI_MATTERMOST_AUTO_CONNECT === "1" ||
++		process.env.PI_MATTERMOST_AUTO_CONNECT === "true";
++	if (autoConnect) {
++		pi.on("session_start", async (_event, ctx) => {
++			if (currentSession) return; // already connected
++			const projectPath = ctx.cwd;
++			const sessionId = crypto.randomUUID();
++			ctx.ui.notify("Auto-connecting to Mattermost...", "info");
++			const res = await bridgeFetch("/api/register-session", {
++				projectPath,
++				sessionId,
++			});
++			if (!res.ok) {
++				console.error(`[pi-matter] auto-connect failed: status ${res.status}`);
++				ctx.ui.notify(`Auto-connect failed (status ${res.status})`, "error");
++				return;
++			}
++			currentSession = {
++				channelId: res.data.channelId,
++				channelName: res.data.channelName,
++				sessionId: res.data.sessionId,
++				projectPath,
++			};
++			startPolling(pi, currentSession);
++			console.log(`[pi-matter] auto-connected to channel: ${res.data.channelName}`);
++			ctx.ui.notify(`Connected to Mattermost channel: ${res.data.channelName}`, "info");
++		});
++	}
++
+ 	pi.registerCommand("matter-clear", {
+ 		description:
+ 			"DELETE ALL Mattermost channels created by pi-matter. Irreversible.",
