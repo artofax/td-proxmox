@@ -587,7 +587,142 @@ chmod 600 /root/.netrc'"
       echo \"export OPENROUTER_API_KEY=$OPENROUTER_KEY\" >> /root/.bashrc
   '"
 
-  log "  (Add OpenRouter to pi as a model provider on first launch — pi's own provider config isn't scripted here yet.)"
+  # 3. Seed pi's global AGENTS.md with the homelab topology.
+  #
+  # pi auto-loads AGENTS.md from three locations on launch, in order:
+  #   1. ~/.pi/agent/AGENTS.md  (user-global, always loaded)
+  #   2. parent dirs of the working dir, walking up
+  #   3. current working dir
+  # Writing to (1) means every pi session — regardless of where it's
+  # launched from — has the homelab context immediately. No per-session
+  # @-mentioning of context docs, no "ssh root@?" guessing.
+  #
+  # Re-runs of configure-apps.sh overwrite this file to keep it in sync
+  # with any rotated tokens or newly-added CTs.
+  log "  Writing /root/.pi/agent/AGENTS.md (homelab topology for pi)..."
+
+  # Build the doc dynamically so we omit lines for CTs that don't exist
+  # (--skip-sandbox, --skip-openwebui). Whether the sandbox CT is named
+  # 'sandbox' or 'docker' is also reflected — pi gets the actual reachable
+  # hostname, not a generic placeholder.
+  #
+  # configure_homepage resolves SANDBOX_HOSTNAME but it runs AFTER us — so
+  # we resolve it ourselves here from SANDBOX_CTID. Falls back to 'sandbox'
+  # if the CTID isn't set (meaning bootstrap --skip-sandbox was used).
+  local SANDBOX_HOSTNAME_AGENTS="sandbox"
+  if [[ -n "${SANDBOX_CTID:-}" ]]; then
+    SANDBOX_HOSTNAME_AGENTS="$(pct config "$SANDBOX_CTID" 2>/dev/null | awk '/^hostname:/ {print $2}')"
+    : "${SANDBOX_HOSTNAME_AGENTS:=sandbox}"
+  fi
+  local AGENTS_MD
+  AGENTS_MD="$(cat <<EOF
+# TD Homelab — pi context
+
+You are running on the \`ollama-pi-agent\` LXC inside a Proxmox VE 9 host.
+Other CTs on the same Tailscale tailnet are reachable by their MagicDNS
+hostnames. Passwordless SSH is already configured to each of them.
+
+## Reachable hosts
+
+| Host | What | Reach |
+|---|---|---|
+| \`gitea\` | Self-hosted Git server (http://gitea:3000) | \`ssh root@gitea\`, \`git push http://gitea:3000/$ADMIN_USER/<repo>.git\` |
+EOF
+)"
+
+  if [[ -n "${SANDBOX_CTID:-}" ]]; then
+    AGENTS_MD+="
+| \`$SANDBOX_HOSTNAME_AGENTS\` | Docker host (run containers here, not locally) | \`ssh root@$SANDBOX_HOSTNAME_AGENTS docker run ...\` |"
+  fi
+  if [[ -n "${OPENWEBUI_CTID:-}" ]]; then
+    AGENTS_MD+="
+| \`openwebui\` | ChatGPT-style UI + colocated Ollama | http://openwebui:8080 |"
+  fi
+  AGENTS_MD+="
+| \`homepage\` | Dashboard (services.yaml at /opt/homepage/config/services.yaml) | http://homepage:3000 |
+
+## Git push to Gitea is passwordless
+
+\`/root/.netrc\` is configured with a Gitea access token (login \`$ADMIN_USER\`).
+\`git push http://gitea:3000/$ADMIN_USER/<repo>.git\` works without prompting.
+For curl-against-API, just \`curl -n http://gitea:3000/api/v1/...\` (uses .netrc).
+
+To create a new Gitea repo programmatically:
+
+\`\`\`bash
+curl -n -X POST http://gitea:3000/api/v1/user/repos \\
+  -H 'Content-Type: application/json' \\
+  -d '{\"name\":\"<repo-name>\",\"private\":false,\"auto_init\":false}'
+\`\`\`
+"
+
+  if [[ -n "${SANDBOX_CTID:-}" ]]; then
+    AGENTS_MD+="
+## Docker workloads run on \`$SANDBOX_HOSTNAME_AGENTS\` — not here
+
+The pi host does **not** run Docker. SSH into \`$SANDBOX_HOSTNAME_AGENTS\` for any
+container work:
+
+\`\`\`bash
+ssh root@$SANDBOX_HOSTNAME_AGENTS docker run --rm hello-world
+ssh root@$SANDBOX_HOSTNAME_AGENTS docker compose -f /root/uploads/<file>.yml up -d
+\`\`\`
+
+Drop Dockerfiles / compose files into \`$SANDBOX_HOSTNAME_AGENTS\`'s
+\`/root/uploads/\` (via the filebrowser at http://$SANDBOX_HOSTNAME_AGENTS:8080)
+to have them locally for builds.
+"
+  fi
+
+  AGENTS_MD+="
+## File conventions
+
+- \`/root/uploads/\` on this host is served by filebrowser at
+  http://ollama-pi-agent:8080. Files dropped there via the web UI are
+  readable here without any further action.
+- The same convention is repeated on \`$SANDBOX_HOSTNAME_AGENTS\` for docker workflows.
+
+## Defaults
+
+- Gitea owner / admin user: \`$ADMIN_USER\`
+- Default branch when initializing repos: \`main\`
+- OpenRouter API key is available as \`\$OPENROUTER_API_KEY\` (exported in /root/.bashrc).
+
+## Registering a new app on the Homepage dashboard
+
+If you stand up a new web service, register a tile so it appears on the
+dashboard. The convention + a reusable bash function are documented at
+\`/root/homepage-tile-convention.md\` (also in the repo at
+\`addons/homepage-tile-convention.md\`). Short version:
+
+\`\`\`bash
+# Source the function from the convention doc, then:
+register_homepage_tile \"docker-<app>\" \"Sandbox\" \"<App Name>\" \\
+  \"http://$SANDBOX_HOSTNAME_AGENTS:<port>\" \"<short description>\" \"<icon>.png\"
+\`\`\`
+
+## Things NOT to do
+
+- Don't run \`docker\` on this host. Use \`ssh root@$SANDBOX_HOSTNAME_AGENTS docker ...\`.
+- Don't store secrets in committed code. \`/root/.netrc\` and \`/root/.bashrc\`
+  exports stay on this CT only.
+- Don't run Ollama models locally beyond what fits in memory — for big models,
+  rely on the cloud-cloud variant (the colocated Ollama on \`openwebui\` is
+  already signed in).
+"
+
+  # Write the file. Use printf '%s\\n' piped to tee so the heredoc-derived
+  # markdown is preserved verbatim (no further shell expansion inside the CT).
+  # mkdir -p ensures the directory chain exists on a fresh pi install.
+  if (( DRY_RUN )); then
+    printf '[dry-run] would write /root/.pi/agent/AGENTS.md (%d lines)\n' "$(printf '%s' "$AGENTS_MD" | wc -l)"
+  else
+    run "pct exec $PI_HOST_CTID -- mkdir -p /root/.pi/agent"
+    printf '%s\n' "$AGENTS_MD" | pct exec "$PI_HOST_CTID" -- tee /root/.pi/agent/AGENTS.md >/dev/null
+    log "    Wrote $(pct exec "$PI_HOST_CTID" -- wc -l < /root/.pi/agent/AGENTS.md) lines."
+  fi
+
+  log "  Done. pi will pick up the new context on next launch."
 }
 
 # ----- homepage dashboard ----------------------------------------------------
