@@ -19,6 +19,7 @@ For pi (or you, writing scripts that pi runs) registering tiles on the Homepage 
 | [`setup-vzdump-schedule.sh`](setup-vzdump-schedule.sh) | Idempotent vzdump job in `/etc/pve/jobs.cfg` — nightly CT backups to your backup drive with sensible retention | PVE host | <1 min |
 | [`setup-new-pi-agent.sh`](setup-new-pi-agent.sh) | Stand up an additional `ollama-pi-agent`-style CT from scratch — pct create + Tailscale + Ollama + pi + bidirectional SSH trust mesh + web UIs + SMB share + Homepage tile | new CT (auto-named `pi-agent-N`) | ~10 min |
 | [`setup-smb-share.sh`](setup-smb-share.sh) | Expose `/root` on a pi agent over SMB so you can mount the agent's home directory from macOS Finder / Windows Explorer / Linux | `ollama-pi-agent` (default), any pi-agent | ~2 min |
+| [`setup-mattermost.sh`](setup-mattermost.sh) | Stand up a Mattermost CT (self-hosted team chat) + full auto-config: admin user, enable PATs, create default team, register Homepage tile with widget | new CT | ~10 min |
 
 ---
 
