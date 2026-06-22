@@ -597,17 +597,48 @@ fi
 # Both admin PAT (for Homepage widget) and bot creds (for pi automation) land
 # here. configure_pi_host reads MATTERMOST_BOT_TOKEN to export it as an env
 # var in ollama-pi-agent's /root/.bashrc, so pi sees it as $MATTERMOST_BOT_TOKEN.
-if [[ -n "$MM_TOKEN" && -f "$TOKENS_FILE" ]] && (( ! DRY_RUN )); then
+#
+# Note: write whatever we have, even if some fields are empty. Earlier
+# revisions gated the entire append on MM_TOKEN (admin PAT) being set,
+# which meant a partial run (bot created OK but admin PAT mint failed)
+# wrote NOTHING — bot creds were lost. Now each field stands on its own;
+# configure_pi_host's exporter handles empty values gracefully (just
+# skips that line in bashrc).
+if [[ -f "$TOKENS_FILE" ]] && (( ! DRY_RUN )); then
+  # If td-tokens.txt already has MATTERMOST_* lines from a prior run,
+  # strip them first so the file stays canonical (no stale duplicates).
+  if grep -q "^MATTERMOST_" "$TOKENS_FILE"; then
+    log "Stripping prior MATTERMOST_* entries from $TOKENS_FILE..."
+    sed -i '/^MATTERMOST_/d' "$TOKENS_FILE"
+    # Also collapse any resulting double-blank lines
+    sed -i '/^$/N;/^\n$/D' "$TOKENS_FILE"
+  fi
+
   log "Appending Mattermost details to $TOKENS_FILE..."
   cat >> "$TOKENS_FILE" <<EOF
 
 MATTERMOST_URL=http://$MM_IP:8065
-MATTERMOST_TOKEN=$MM_TOKEN
-MATTERMOST_TEAM_ID=$MM_TEAM_ID
+MATTERMOST_TOKEN=${MM_TOKEN:-}
+MATTERMOST_TEAM_ID=${MM_TEAM_ID:-}
 MATTERMOST_BOT_USER_ID=${MM_BOT_USER_ID:-}
 MATTERMOST_BOT_TOKEN=${MM_BOT_TOKEN:-}
 MATTERMOST_BOT_CHANNEL_ID=${MM_BOT_CHANNEL_ID:-}
 EOF
+
+  # Surface which values are populated so the user sees the partial-success
+  # state without having to cat the file.
+  log "  Wrote — populated fields:"
+  for var in MM_TOKEN MM_TEAM_ID MM_BOT_USER_ID MM_BOT_TOKEN MM_BOT_CHANNEL_ID; do
+    if [[ -n "${!var}" ]]; then
+      log "    ${var/MM_/MATTERMOST_} ✓"
+    else
+      warn "    ${var/MM_/MATTERMOST_} (empty)"
+    fi
+  done
+elif [[ ! -f "$TOKENS_FILE" ]]; then
+  warn "$TOKENS_FILE doesn't exist — skipping MM creds save."
+  warn "  (Was configure-apps.sh ever run? It creates td-tokens.txt at the end of its run.)"
+  warn "  You can still recover the creds manually — they're inside the Mattermost UI."
 fi
 
 # ----- done ---------------------------------------------------------------
