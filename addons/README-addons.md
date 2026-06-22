@@ -515,6 +515,112 @@ smbutil view -g //root@ollama-pi-agent
 
 ---
 
+## `setup-mattermost.sh`
+
+Stand up a Mattermost CT (self-hosted team chat) with full auto-config so the dashboard tile, admin account, default team, and bot identity are all wired in before you ever open the web UI. Communication side of the homelab — gives you a place for build-status pings, job-completion notifications from pi, and human chat all in one app.
+
+End state per invocation: a new CT named `mattermost`, joined to the tailnet, Mattermost running, admin user created (system admin via the first-signup convention), personal access tokens enabled, a `TD Homelab` team created with the admin and a dedicated `pi-bot` account in it, a `#bot` channel populated, and a Homepage tile (with the native `mattermost` widget) registered.
+
+**What gets created:**
+
+| Entity | Where | Purpose |
+|---|---|---|
+| New CT `mattermost` | via community-scripts/ct/mattermost.sh | Hosts the Mattermost server (port 8065) |
+| Admin user `td` (or whatever your homelab admin user is) | inside Mattermost | Logs into the UI, owns the Homepage widget PAT |
+| Team `TD Homelab` | inside Mattermost | Default team — URL slug `td-homelab` |
+| Bot account `pi-bot` ("pi (bot)") | inside Mattermost, added to team | Identity pi uses for automated posts |
+| Channel `#bot` (public) | inside the team, pi-bot added | Default place for automated posts |
+| Admin PAT | written to `/root/td-tokens.txt` as `MATTERMOST_TOKEN` | Used by Homepage widget |
+| Bot PAT | written to `/root/td-tokens.txt` as `MATTERMOST_BOT_TOKEN` | Used by pi automation |
+| Homepage tile | services.yaml Communication group | Dashboard entry with live widget |
+
+**Prereqs:**
+
+- A working homelab (bootstrap finished, Tailscale up, Homepage CT alive)
+- A reusable Tailscale auth key (the new CT joins the tailnet) — script reads from `/etc/td-proxmox/.vars` if present, else prompts
+- `/root/td-tokens.txt` should exist (written by `configure-apps.sh`) — the script reads admin user/email/password from it so Mattermost reuses the same credentials as Gitea + OpenWebUI. Falls back to interactive prompt if the file isn't there.
+
+**Install:**
+
+```bash
+# On the PVE host, inside your td-proxmox clone
+./addons/setup-mattermost.sh
+```
+
+The community-scripts helper's whiptail menu will appear — pick **Default Install** and hit Enter. The script handles everything after that automatically. About 10 minutes total.
+
+**Flags:**
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--hostname NAME` | `mattermost` | CT hostname |
+| `--ctid N` | auto via `pvesh` | Explicit CTID |
+| `--cpu N` | `2` | CPU cores |
+| `--ram MB` | `4096` | Memory (MB) |
+| `--disk GB` | `16` | Root disk (GB) |
+| `--admin-user NAME` | from td-tokens.txt or prompt | Mattermost admin username |
+| `--admin-email EMAIL` | from td-tokens.txt or prompt | Admin email |
+| `--admin-password PW` | from td-tokens.txt or prompt | Admin password (min 8 chars) |
+| `--team-name NAME` | `TD Homelab` | Default team display name (URL slug derived) |
+| `--ts-authkey KEY` | from .vars or prompt | Tailscale auth key |
+| `--ct-password PW` | (prompt) | CT root password |
+| `--skip-homepage-tile` | — | Don't register the Homepage tile |
+| `--skip-tailscale` | — | Don't join the new CT to the tailnet (LAN-only access) |
+| `--dry-run` | — | Preview everything without executing |
+
+**Mattermost-specific quirks handled by the script:**
+
+1. **Personal access tokens are disabled by default.** The script enables them via `PUT /api/v4/config` (sets `ServiceSettings.EnableUserAccessTokens=true`) and restarts Mattermost before minting any tokens.
+2. **Email verification is disabled** in the same config PUT (`EmailSettings.RequireEmailVerification=false`) so the admin can log in immediately after signup without an email-loop.
+3. **First-user-becomes-admin** — Mattermost's convention is that the first signup on a fresh install gets system-admin privileges. The script signs up the admin user before anything else; if signup returns "username exists" it falls through to login (handles re-runs gracefully).
+4. **The bot is added to the team AND the channel separately.** Mattermost requires explicit `team/members` and `channels/members` membership for a bot to post anywhere — adding to one doesn't grant the other.
+
+**After install — log into Mattermost:**
+
+Open `http://mattermost:8065` in a browser:
+
+- Sign in with your homelab admin user + password
+- You land directly in the **TD Homelab** team, inside Town Square
+- Sidebar shows a `#bot` channel (created automatically) — that's where pi's automated posts go by default
+
+**After install — let pi know about it:**
+
+```bash
+# Re-run configure-apps.sh's pi step so AGENTS.md gets the Mattermost section
+./automation/configure-apps.sh --only pi
+```
+
+This regenerates `/root/.pi/agent/AGENTS.md` with a new "Posting to Mattermost programmatically" section AND exports `MATTERMOST_BOT_TOKEN` + `MATTERMOST_BOT_CHANNEL_ID` in `/root/.bashrc` on ollama-pi-agent. After this, pi can post status updates with a single curl using just env vars:
+
+```bash
+curl -sS -X POST 'http://mattermost:8065/api/v4/posts' \
+  -H "Authorization: Bearer $MATTERMOST_BOT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"channel_id\":\"$MATTERMOST_BOT_CHANNEL_ID\",\"message\":\"build complete\"}"
+```
+
+**Re-run safety:**
+
+The addon is idempotent at the API level:
+
+- Bot already exists → looks it up by `GET /api/v4/users/username/pi-bot` and reuses the user_id
+- Channel already exists → looks it up by `GET /api/v4/teams/{tid}/channels/name/bot` and reuses the channel_id
+- Token already exists → mint will fail; the script surfaces the error in `warn()` and continues (you can rotate by deleting the old token in Mattermost UI first, then re-running)
+- Team already exists → returns HTTP 400; script proceeds without recreating
+
+It is **not** idempotent at the CT level — re-running with the same `--hostname` aborts because the CT already exists. To rebuild from scratch, destroy the CT first: `pct stop <ctid> && pct destroy <ctid>`.
+
+**Two identities, distinct rotation lifecycle:**
+
+| Identity | Token in td-tokens.txt | Used by | Rotation |
+|---|---|---|---|
+| `td` (admin) | `MATTERMOST_TOKEN` | Homepage widget (post/unread counts) | Rotate in Mattermost UI → Settings → Security |
+| `pi-bot` (bot account) | `MATTERMOST_BOT_TOKEN` | Pi for automation | Rotate via API: `POST /api/v4/users/<bot_id>/tokens` (admin auth) |
+
+This separation means a token leak from one doesn't compromise the other. Pi automation can't impersonate the admin; admin token rotation doesn't break pi.
+
+---
+
 ## Setting up a USB drive as a backup target
 
 `setup-pve-etc-backup.sh` (and `vzdump`) need somewhere to write. If you haven't already prepped a USB drive on the PVE host, the short version:
