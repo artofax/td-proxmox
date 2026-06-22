@@ -450,6 +450,93 @@ print(json.dumps(c))
       warn "  Team create returned HTTP $TEAM_STATUS. Body: $TEAM_BODYR"
       warn "  Probably already exists. The admin can create one manually after login if needed."
     fi
+
+    # 6. Create a dedicated bot account for pi automation
+    #
+    # Bot accounts are first-class in Mattermost (POST /api/v4/bots) and are
+    # the right shape for "agent posts status updates" workloads:
+    #   - Distinct identity in the UI (posts show as 'pi (bot)' not as the admin)
+    #   - Own access token (admin PAT leak doesn't compromise bot, and vice versa)
+    #   - Can be confined to one channel rather than every channel the admin sees
+    #
+    # We also create a public #bot channel and put the bot in it so pi has a
+    # default landing place for automation messages. The bot id + token + channel
+    # id all get exported from /root/td-tokens.txt for pi to consume.
+    log "Creating pi-bot account + #bot channel..."
+
+    MM_BOT_USER_ID=""
+    MM_BOT_TOKEN=""
+    MM_BOT_CHANNEL_ID=""
+
+    BOT_BODY='{"username":"pi-bot","display_name":"pi (bot)","description":"Pi coding agent automation"}'
+    BOT_RESP=$(_mm_post "/api/v4/bots" "$BOT_BODY" "$AUTH_HEADER")
+    BOT_STATUS=$(_mm_status "$BOT_RESP")
+    BOT_BODYR=$(_mm_body "$BOT_RESP")
+
+    if [[ "$BOT_STATUS" == "200" || "$BOT_STATUS" == "201" ]]; then
+      MM_BOT_USER_ID=$(echo "$BOT_BODYR" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("user_id",""))' 2>/dev/null || true)
+      log "  Bot 'pi-bot' created. user_id=$MM_BOT_USER_ID"
+    elif [[ "$BOT_STATUS" == "400" ]]; then
+      # Already exists — fetch user_id by username so re-runs reuse it
+      log "  Bot 'pi-bot' already exists — fetching user_id..."
+      LOOKUP=$(_mm_get "/api/v4/users/username/pi-bot" "$AUTH_HEADER")
+      LOOKUP_STATUS=$(_mm_status "$LOOKUP")
+      if [[ "$LOOKUP_STATUS" == "200" ]]; then
+        MM_BOT_USER_ID=$(_mm_body "$LOOKUP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+      fi
+    else
+      warn "  Bot create returned HTTP $BOT_STATUS. Body: $BOT_BODYR"
+    fi
+
+    if [[ -n "$MM_BOT_USER_ID" ]]; then
+      # Add bot to the default team. Required before it can join any channels there.
+      if [[ -n "$MM_TEAM_ID" ]]; then
+        BOT_TEAM_BODY=$(printf '{"team_id":"%s","user_id":"%s"}' "$MM_TEAM_ID" "$MM_BOT_USER_ID")
+        _mm_post "/api/v4/teams/$MM_TEAM_ID/members" "$BOT_TEAM_BODY" "$AUTH_HEADER" >/dev/null
+        log "  Added pi-bot to team."
+      fi
+
+      # Mint a personal access token for the bot. Same endpoint as user tokens.
+      BOT_TOKEN_BODY='{"description":"pi-agent automation token"}'
+      BTRESP=$(_mm_post "/api/v4/users/$MM_BOT_USER_ID/tokens" "$BOT_TOKEN_BODY" "$AUTH_HEADER")
+      BTSTATUS=$(_mm_status "$BTRESP")
+      BTBODY=$(_mm_body "$BTRESP")
+      if [[ "$BTSTATUS" == "200" || "$BTSTATUS" == "201" ]]; then
+        MM_BOT_TOKEN=$(echo "$BTBODY" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)
+        log "  Bot token minted (length: ${#MM_BOT_TOKEN})"
+      else
+        warn "  Bot token mint returned HTTP $BTSTATUS. Body: $BTBODY"
+      fi
+
+      # Create #bot channel in the team. type=O is public/open.
+      if [[ -n "$MM_TEAM_ID" ]]; then
+        CHAN_BODY=$(printf '{"team_id":"%s","name":"bot","display_name":"Bot Posts","type":"O","purpose":"Automated posts from pi and other homelab bots"}' "$MM_TEAM_ID")
+        CHRESP=$(_mm_post "/api/v4/channels" "$CHAN_BODY" "$AUTH_HEADER")
+        CHSTATUS=$(_mm_status "$CHRESP")
+        CHBODY=$(_mm_body "$CHRESP")
+        if [[ "$CHSTATUS" == "200" || "$CHSTATUS" == "201" ]]; then
+          MM_BOT_CHANNEL_ID=$(echo "$CHBODY" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+          log "  #bot channel created: id=$MM_BOT_CHANNEL_ID"
+        elif [[ "$CHSTATUS" == "400" ]]; then
+          # Channel name collision — fetch the existing one
+          log "  #bot channel already exists — fetching id..."
+          LOOKUP=$(_mm_get "/api/v4/teams/$MM_TEAM_ID/channels/name/bot" "$AUTH_HEADER")
+          LOOKUP_STATUS=$(_mm_status "$LOOKUP")
+          if [[ "$LOOKUP_STATUS" == "200" ]]; then
+            MM_BOT_CHANNEL_ID=$(_mm_body "$LOOKUP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+          fi
+        else
+          warn "  Channel create returned HTTP $CHSTATUS. Body: $CHBODY"
+        fi
+
+        # Add bot to channel so it can post
+        if [[ -n "$MM_BOT_CHANNEL_ID" ]]; then
+          CHM_BODY=$(printf '{"user_id":"%s"}' "$MM_BOT_USER_ID")
+          _mm_post "/api/v4/channels/$MM_BOT_CHANNEL_ID/members" "$CHM_BODY" "$AUTH_HEADER" >/dev/null
+          log "  Added pi-bot to #bot channel."
+        fi
+      fi
+    fi
   fi
 fi
 
@@ -506,7 +593,10 @@ $widget_block"
   fi
 fi
 
-# ----- save MM token + team id to /root/td-tokens.txt for the user ---------
+# ----- save MM token + bot creds to /root/td-tokens.txt for the user -------
+# Both admin PAT (for Homepage widget) and bot creds (for pi automation) land
+# here. configure_pi_host reads MATTERMOST_BOT_TOKEN to export it as an env
+# var in ollama-pi-agent's /root/.bashrc, so pi sees it as $MATTERMOST_BOT_TOKEN.
 if [[ -n "$MM_TOKEN" && -f "$TOKENS_FILE" ]] && (( ! DRY_RUN )); then
   log "Appending Mattermost details to $TOKENS_FILE..."
   cat >> "$TOKENS_FILE" <<EOF
@@ -514,6 +604,9 @@ if [[ -n "$MM_TOKEN" && -f "$TOKENS_FILE" ]] && (( ! DRY_RUN )); then
 MATTERMOST_URL=http://$MM_IP:8065
 MATTERMOST_TOKEN=$MM_TOKEN
 MATTERMOST_TEAM_ID=$MM_TEAM_ID
+MATTERMOST_BOT_USER_ID=${MM_BOT_USER_ID:-}
+MATTERMOST_BOT_TOKEN=${MM_BOT_TOKEN:-}
+MATTERMOST_BOT_CHANNEL_ID=${MM_BOT_CHANNEL_ID:-}
 EOF
 fi
 

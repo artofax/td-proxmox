@@ -587,6 +587,24 @@ chmod 600 /root/.netrc'"
       echo \"export OPENROUTER_API_KEY=$OPENROUTER_KEY\" >> /root/.bashrc
   '"
 
+  # 2b. If setup-mattermost.sh has been run, also export the bot token +
+  # bot channel id so pi can post status updates with one curl call. The
+  # addon writes these to /root/td-tokens.txt; we re-export to /root/.bashrc
+  # on the pi host so they show up as environment variables. Idempotent —
+  # each grep gates an append.
+  local MM_BOT_TOKEN_LOCAL MM_BOT_CHANNEL_LOCAL
+  MM_BOT_TOKEN_LOCAL="$(awk -F= '/^MATTERMOST_BOT_TOKEN=/{sub(/^[^=]*=/,"",$0); print; exit}' "$TOKENS_FILE" 2>/dev/null || true)"
+  MM_BOT_CHANNEL_LOCAL="$(awk -F= '/^MATTERMOST_BOT_CHANNEL_ID=/{sub(/^[^=]*=/,"",$0); print; exit}' "$TOKENS_FILE" 2>/dev/null || true)"
+  if [[ -n "$MM_BOT_TOKEN_LOCAL" ]]; then
+    log "  Exporting MATTERMOST_BOT_TOKEN + MATTERMOST_BOT_CHANNEL_ID in /root/.bashrc..."
+    run "pct exec $PI_HOST_CTID -- bash -c '
+      grep -q MATTERMOST_BOT_TOKEN /root/.bashrc || \
+        echo \"export MATTERMOST_BOT_TOKEN=$MM_BOT_TOKEN_LOCAL\" >> /root/.bashrc
+      grep -q MATTERMOST_BOT_CHANNEL_ID /root/.bashrc || \
+        echo \"export MATTERMOST_BOT_CHANNEL_ID=$MM_BOT_CHANNEL_LOCAL\" >> /root/.bashrc
+    '"
+  fi
+
   # 3. Seed pi's global AGENTS.md with the homelab topology.
   #
   # pi auto-loads AGENTS.md from three locations on launch, in order:
@@ -689,23 +707,48 @@ to have them locally for builds.
     AGENTS_MD+="
 ## Posting to Mattermost programmatically
 
-Mattermost is reachable at \`http://mattermost:8065\`. A personal access
-token for the homelab admin is stored in \`/root/td-tokens.txt\` as
-\`MATTERMOST_TOKEN\` (the default team id is in \`MATTERMOST_TEAM_ID\`).
-To post a message to a channel:
+Mattermost is reachable at \`http://mattermost:8065\`. A dedicated bot
+account named \`pi-bot\` exists with its own access token + a dedicated
+\`#bot\` channel in the TD Homelab team. Both are already exported as
+environment variables in \`/root/.bashrc\`:
+
+- \`\$MATTERMOST_BOT_TOKEN\` — the bot's personal access token
+- \`\$MATTERMOST_BOT_CHANNEL_ID\` — the id of the \`#bot\` channel
+
+**Post a message** (default channel — show status updates, build results,
+job completion pings):
 
 \`\`\`bash
-TOKEN=\$(awk -F= '/^MATTERMOST_TOKEN=/{print \$2}' /root/td-tokens.txt)
-CHANNEL_ID=...  # GET /api/v4/channels/name/\$TEAM_ID/name/town-square
 curl -sS -X POST 'http://mattermost:8065/api/v4/posts' \\
-  -H \"Authorization: Bearer \$TOKEN\" \\
+  -H \"Authorization: Bearer \$MATTERMOST_BOT_TOKEN\" \\
   -H 'Content-Type: application/json' \\
-  -d '{\"channel_id\":\"'\$CHANNEL_ID'\",\"message\":\"hello from pi\"}'
+  -d \"{\\\"channel_id\\\":\\\"\$MATTERMOST_BOT_CHANNEL_ID\\\",\\\"message\\\":\\\"hello from pi\\\"}\"
 \`\`\`
 
-This is handy for build-status pings, long-running job completion
-notifications, etc. Don't spam human channels — create a dedicated
-\`#bot\` channel first.
+**Post to a different channel** (look up id first by name):
+
+\`\`\`bash
+# Look up town-square id for the default team
+TEAM_ID=\$(awk -F= '/^MATTERMOST_TEAM_ID=/{print \$2}' /root/td-tokens.txt)
+CHANNEL_ID=\$(curl -sS -H \"Authorization: Bearer \$MATTERMOST_BOT_TOKEN\" \\
+  \"http://mattermost:8065/api/v4/teams/\$TEAM_ID/channels/name/town-square\" \\
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"id\"])')
+
+# Then post the same way
+curl -sS -X POST 'http://mattermost:8065/api/v4/posts' \\
+  -H \"Authorization: Bearer \$MATTERMOST_BOT_TOKEN\" \\
+  -H 'Content-Type: application/json' \\
+  -d \"{\\\"channel_id\\\":\\\"\$CHANNEL_ID\\\",\\\"message\\\":\\\"...\\\"}\"
+\`\`\`
+
+The bot can only post to channels it's been added to. Default it's only
+in \`#bot\` — to post elsewhere, first add it via:
+\`POST /api/v4/channels/{channel_id}/members\` with the bot's user_id
+(stored as \`MATTERMOST_BOT_USER_ID\` in \`/root/td-tokens.txt\`).
+
+**Note:** \`MATTERMOST_TOKEN\` (in td-tokens.txt) is the *admin* PAT used
+by the Homepage widget. Use \`MATTERMOST_BOT_TOKEN\` for pi automation —
+distinct identity, distinct rotation lifecycle.
 "
   fi
   AGENTS_MD+="
