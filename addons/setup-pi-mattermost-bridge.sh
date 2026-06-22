@@ -177,6 +177,13 @@ else
 fi
 
 # ----- 2. push + apply our patches ---------------------------------------
+# The community-scripts/openwebui-style debian-12 templates have an extremely
+# minimal apt footprint — git and patch aren't preinstalled. Both are needed
+# for the apply-chain below. Install them now (idempotent; apt no-ops on
+# already-installed).
+log "Ensuring 'git' and 'patch' are installed in the CT (needed for patch application)..."
+run "pct exec $PI_CTID -- bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git patch >/dev/null'"
+
 log "Pushing patches into the CT..."
 run "pct exec $PI_CTID -- mkdir -p /tmp/pi-mm-patches"
 for p in "$ASSETS_DIR/patches"/*.patch; do
