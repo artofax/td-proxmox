@@ -614,6 +614,13 @@ chmod 600 /root/.netrc'"
     SANDBOX_HOSTNAME_AGENTS="$(pct config "$SANDBOX_CTID" 2>/dev/null | awk '/^hostname:/ {print $2}')"
     : "${SANDBOX_HOSTNAME_AGENTS:=sandbox}"
   fi
+
+  # Optional add-on CTs that aren't tracked by resolve_ctids but pi should
+  # know about if they exist. setup-mattermost.sh creates 'mattermost' if the
+  # user has run that addon. Detect inline so re-runs of configure-apps.sh
+  # pick up newly-installed addon CTs without code changes.
+  local MM_CTID
+  MM_CTID="$(find_ct_by_hostname mattermost 2>/dev/null || true)"
   local AGENTS_MD
   AGENTS_MD="$(cat <<EOF
 # TD Homelab — pi context
@@ -637,6 +644,10 @@ EOF
   if [[ -n "${OPENWEBUI_CTID:-}" ]]; then
     AGENTS_MD+="
 | \`openwebui\` | ChatGPT-style UI + colocated Ollama | http://openwebui:8080 |"
+  fi
+  if [[ -n "$MM_CTID" ]]; then
+    AGENTS_MD+="
+| \`mattermost\` | Self-hosted team chat (default team: TD Homelab) | http://mattermost:8065 |"
   fi
   AGENTS_MD+="
 | \`homepage\` | Dashboard (services.yaml at /opt/homepage/config/services.yaml) | http://homepage:3000 |
@@ -674,6 +685,29 @@ to have them locally for builds.
 "
   fi
 
+  if [[ -n "$MM_CTID" ]]; then
+    AGENTS_MD+="
+## Posting to Mattermost programmatically
+
+Mattermost is reachable at \`http://mattermost:8065\`. A personal access
+token for the homelab admin is stored in \`/root/td-tokens.txt\` as
+\`MATTERMOST_TOKEN\` (the default team id is in \`MATTERMOST_TEAM_ID\`).
+To post a message to a channel:
+
+\`\`\`bash
+TOKEN=\$(awk -F= '/^MATTERMOST_TOKEN=/{print \$2}' /root/td-tokens.txt)
+CHANNEL_ID=...  # GET /api/v4/channels/name/\$TEAM_ID/name/town-square
+curl -sS -X POST 'http://mattermost:8065/api/v4/posts' \\
+  -H \"Authorization: Bearer \$TOKEN\" \\
+  -H 'Content-Type: application/json' \\
+  -d '{\"channel_id\":\"'\$CHANNEL_ID'\",\"message\":\"hello from pi\"}'
+\`\`\`
+
+This is handy for build-status pings, long-running job completion
+notifications, etc. Don't spam human channels — create a dedicated
+\`#bot\` channel first.
+"
+  fi
   AGENTS_MD+="
 ## File conventions
 
