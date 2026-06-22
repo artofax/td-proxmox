@@ -403,8 +403,17 @@ if (( ! DRY_RUN )); then
       NEW_CFG=$(echo "$CFG_RESP" | python3 -c "
 import sys, json
 c = json.load(sys.stdin)
+# Three settings to flip:
+#  1. EnableUserAccessTokens — required to mint admin PAT for Homepage
+#     widget AND the bot's PAT.
+#  2. EnableBotAccountCreation — defaults to FALSE in Mattermost. Without
+#     it, POST /api/v4/bots returns 403 'api.bot.create_disabled' even
+#     for system admins. (Caught by user 2026-06-22 — bot was being
+#     blocked here, leaving the entire automation chain broken.)
+#  3. RequireEmailVerification — turn off so future signups don't loop
+#     on email-confirm.
 c.setdefault('ServiceSettings', {})['EnableUserAccessTokens'] = True
-# Also disable email verification so future signups don't get stuck
+c.setdefault('ServiceSettings', {})['EnableBotAccountCreation'] = True
 c.setdefault('EmailSettings', {})['RequireEmailVerification'] = False
 print(json.dumps(c))
 " 2>/dev/null || true)
@@ -464,16 +473,29 @@ print(json.dumps(c))
     if [[ "$TEAM_STATUS" == "200" || "$TEAM_STATUS" == "201" ]]; then
       MM_TEAM_ID=$(echo "$TEAM_BODYR" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
       log "  Team created: id=$MM_TEAM_ID name=$TEAM_SLUG"
-
-      # The team creator gets auto-added — but be explicit so it works on
-      # re-runs against a team that already exists too.
-      if [[ -n "$MM_USER_ID" && -n "$MM_TEAM_ID" ]]; then
-        MEMBER_BODY=$(printf '{"team_id":"%s","user_id":"%s"}' "$MM_TEAM_ID" "$MM_USER_ID")
-        _mm_post "/api/v4/teams/$MM_TEAM_ID/members" "$MEMBER_BODY" "$AUTH_HEADER" >/dev/null
+    elif [[ "$TEAM_STATUS" == "400" ]] && echo "$TEAM_BODYR" | grep -q 'existing.app_error'; then
+      # Re-run path: team URL already exists — look it up by slug. Without
+      # this fallback, MM_TEAM_ID stays empty, and every downstream operation
+      # that needs a team_id (bot-to-team add, channel create, channel
+      # member add) silently no-ops. The user gets a half-configured
+      # install with no error trail.
+      log "  Team already exists — looking it up by slug '$TEAM_SLUG'..."
+      LOOKUP=$(_mm_get "/api/v4/teams/name/$TEAM_SLUG" "$AUTH_HEADER")
+      LOOKUP_STATUS=$(_mm_status "$LOOKUP")
+      if [[ "$LOOKUP_STATUS" == "200" ]]; then
+        MM_TEAM_ID=$(_mm_body "$LOOKUP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+        log "    Reused id=$MM_TEAM_ID"
+      else
+        warn "    Lookup also failed (HTTP $LOOKUP_STATUS). Bot+channel steps will be skipped."
       fi
     else
       warn "  Team create returned HTTP $TEAM_STATUS. Body: $TEAM_BODYR"
-      warn "  Probably already exists. The admin can create one manually after login if needed."
+    fi
+
+    # Add admin to team — works whether team was newly created or looked-up
+    if [[ -n "$MM_USER_ID" && -n "$MM_TEAM_ID" ]]; then
+      MEMBER_BODY=$(printf '{"team_id":"%s","user_id":"%s"}' "$MM_TEAM_ID" "$MM_USER_ID")
+      _mm_post "/api/v4/teams/$MM_TEAM_ID/members" "$MEMBER_BODY" "$AUTH_HEADER" >/dev/null
     fi
 
     # 6. Create a dedicated bot account for pi automation
