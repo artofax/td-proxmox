@@ -140,22 +140,40 @@ log "  Node bin:  $NODE_BIN"
 PKG_DIR="/root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost"
 
 # ----- 1. install (or update) the bridge via pi's npm --------------------
-# npm's shebang is '#!/usr/bin/env node'. Invoking $NPM_BIN directly makes
-# /usr/bin/env look for 'node' on $PATH inside the CT — which fails unless
-# pi-node's bin is on PATH. Wrap the call in 'bash -lc' so /etc/profile.d
-# and /etc/bash.bashrc add pi-node to PATH first (set up by setup-ollama-pi.sh).
-log "Installing @whonixnetworks/pi-mattermost via pi's npm..."
+# npm's shebang is '#!/usr/bin/env node'. We wrap in 'bash -lc' so pi-node
+# is on PATH (set up by setup-ollama-pi.sh's /etc/profile.d drop-in).
+#
+# Critical: we install LOCALLY (not -g) into /root/.pi/agent/npm. Reason:
+# the bundled patches reference absolute paths under
+# /root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost/, so the
+# package has to land at that exact location for the patches to find their
+# target files. `npm install -g` lands it at
+# /root/.local/share/pi-node/node-vXX/lib/node_modules/ — wrong place, patches
+# fail to apply.
+#
+# Doing `cd /root/.pi/agent/npm && npm install pkg` creates a 'local'
+# install at node_modules/pkg there, matching the layout the patches expect.
+log "Installing @whonixnetworks/pi-mattermost into /root/.pi/agent/npm..."
 if (( ! DRY_RUN )); then
   if pct exec "$PI_CTID" -- test -d "$PKG_DIR"; then
     log "  Already installed at $PKG_DIR. Skipping npm install."
-    log "  (To bump: pct exec $PI_CTID -- bash -lc 'PATH=$NODE_BIN_DIR:\$PATH npm install -g @whonixnetworks/pi-mattermost@latest')"
+    log "  (To bump: pct exec $PI_CTID -- bash -lc 'cd /root/.pi/agent/npm && PATH=$NODE_BIN_DIR:\$PATH npm install @whonixnetworks/pi-mattermost@latest')"
   else
-    # Explicit PATH prefix as a belt-and-suspenders — works even if the
-    # profile.d drop-in isn't picked up by this particular pct exec context.
-    run "pct exec $PI_CTID -- bash -lc 'PATH=\"$NODE_BIN_DIR:\$PATH\" npm install -g @whonixnetworks/pi-mattermost'"
+    run "pct exec $PI_CTID -- bash -lc 'mkdir -p /root/.pi/agent/npm && cd /root/.pi/agent/npm && PATH=\"$NODE_BIN_DIR:\$PATH\" npm install @whonixnetworks/pi-mattermost'"
+  fi
+
+  # Verify the install landed where the patches expect.
+  if ! pct exec "$PI_CTID" -- test -d "$PKG_DIR"; then
+    warn "Package didn't land at $PKG_DIR after install."
+    warn "  npm root -g for the same invocation reports:"
+    pct exec "$PI_CTID" -- bash -lc "PATH=\"$NODE_BIN_DIR:\$PATH\" npm root -g" 2>&1 | sed 's/^/    /' >&2 || true
+    warn "  Wherever it landed, the bundled patches won't find their target"
+    warn "  files. Investigate the actual install location and either move it,"
+    warn "  or symlink it, before proceeding."
+    die "Install location mismatch — refusing to proceed."
   fi
 else
-  printf '[dry-run] would run: pct exec %s -- bash -lc \"PATH=%s:\$PATH npm install -g @whonixnetworks/pi-mattermost\"\n' "$PI_CTID" "$NODE_BIN_DIR"
+  printf '[dry-run] would run: pct exec %s -- bash -lc \"cd /root/.pi/agent/npm && npm install @whonixnetworks/pi-mattermost\"\n' "$PI_CTID"
 fi
 
 # ----- 2. push + apply our patches ---------------------------------------
