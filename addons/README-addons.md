@@ -21,6 +21,7 @@ For pi (or you, writing scripts that pi runs) registering tiles on the Homepage 
 | [`setup-smb-share.sh`](setup-smb-share.sh) | Expose `/root` on a pi agent over SMB so you can mount the agent's home directory from macOS Finder / Windows Explorer / Linux | `ollama-pi-agent` (default), any pi-agent | ~2 min |
 | [`setup-mattermost.sh`](setup-mattermost.sh) | Stand up a Mattermost CT (self-hosted team chat) + full auto-config: admin user, enable PATs, create default team, register Homepage tile with widget | new CT | ~10 min |
 | [`setup-pi-mattermost-bridge.sh`](setup-pi-mattermost-bridge.sh) | Wire bidirectional chat between pi (on `ollama-pi-agent`) and Mattermost. User types in a channel, pi reads + responds. Wraps `@whonixnetworks/pi-mattermost` v1.5.0 + local patches + systemd unit | `ollama-pi-agent` | ~3 min |
+| [`setup-homepage-pi-widgets.sh`](setup-homepage-pi-widgets.sh) | Add two `customapi` tiles to Homepage: (1) live bridge channel-count (orphans / persisted / active), (2) most recent message in #bot. Exposes the bridge on the tailnet and installs a tiny Python proxy on the Mattermost CT to reshape MM's posts response | `ollama-pi-agent`, `mattermost`, `homepage` | ~2 min |
 
 ---
 
@@ -800,6 +801,65 @@ The whole script is idempotent. Re-running:
 - `channel_mappings` row: `INSERT OR REPLACE` — refreshes if the bot channel id ever changes.
 - systemd unit: written every run (template-rendered with current node binary path).
 - `/root/.bashrc` export: `grep -q` before append.
+
+---
+
+## `setup-homepage-pi-widgets.sh`
+
+Adds two Homepage `customapi` tiles for at-a-glance visibility into the pi-Mattermost bridge:
+
+- **Pi Bridge** — live channel-count from the bridge daemon (`/api/channel-count` on port 4000): how many channels are live, how many session rows are persisted, how many are orphaned. Useful for spotting bridge restarts or stale state.
+- **Latest in #bot** — most recent message in the `#bot` channel with relative timestamp. At-a-glance "what did pi just say" without opening Mattermost.
+
+**What it does, end to end:**
+
+1. Drops a systemd drop-in at `/etc/systemd/system/pi-mattermost.service.d/bind-all.conf` inside `ollama-pi-agent` that exports `PI_MATTERMOST_BIND=0.0.0.0`. Without this the bridge listens on `127.0.0.1:4000` only — the Homepage CT can't reach it. Bridge is still auth-gated (Bearer token required), so exposing it on the tailnet is safe.
+2. Reads `/root/.local/share/pi-mattermost/.api_token` from the bridge CT and writes `PI_BRIDGE_TOKEN=…` into `/root/td-tokens.txt` on the PVE host. The Homepage tile uses this token in its `Authorization: Bearer` header.
+3. Looks up the `#bot` channel id via `GET /api/v4/teams/{team_id}/channels/name/bot`.
+4. Installs `/opt/mm-helpers/latest-bot-post.py` + `mm-latest-bot-post.service` inside the Mattermost CT. The Python proxy fetches `/api/v4/channels/<bot>/posts?per_page=1` with the admin token, then re-serializes the response into a flat `{message, user_id, create_at_ms}` shape because Homepage's `customapi` mappings can't index dynamic JSON keys (Mattermost wraps posts in a UUID-keyed dict).
+5. Edits `services.yaml` on the Homepage CT — markered TD-Addon blocks for `pi-bridge` and `mm-latest-post`. Surgical block-replace on re-run.
+6. Restarts the Homepage service so tiles appear immediately.
+
+**Prereqs:** `setup-mattermost.sh` + `setup-pi-mattermost-bridge.sh` both finished. `/root/td-tokens.txt` must have `MATTERMOST_TOKEN` and `MATTERMOST_TEAM_ID`.
+
+**Install:**
+
+```bash
+./addons/setup-homepage-pi-widgets.sh
+```
+
+**Flags:**
+
+| Flag | What it does |
+|---|---|
+| `--no-bridge-tile` | Skip the Pi Bridge tile install (don't expose the bridge, don't write the tile) |
+| `--no-latest-tile` | Skip the Latest in #bot tile install (don't install the MM-side helper) |
+| `--dry-run` | Preview every action without executing |
+| `--uninstall` | Remove the bridge override drop-in, the MM-side helper service, both tiles. Leaves `PI_BRIDGE_TOKEN` in td-tokens.txt for fast re-install. |
+
+**Why a Python proxy on the Mattermost CT?**
+
+Mattermost's `GET /api/v4/channels/{id}/posts?per_page=1` returns:
+
+```json
+{ "order": ["abc123uuid"], "posts": { "abc123uuid": { "message": "hello pi", ... } } }
+```
+
+Homepage's `customapi.mappings.field` does dot-notation extraction (e.g. `field: posts.count`) but can't dereference `posts[order[0]].message` — the inner key is a dynamic UUID. The 30-line proxy reshapes this to:
+
+```json
+{ "message": "hello pi", "user_id": "...", "create_at_ms": 1782175392000 }
+```
+
+…which Homepage maps trivially.
+
+**Re-run safety:**
+
+- Drop-in conf is idempotent — written from scratch every run, no append risk.
+- Bridge token: `PI_BRIDGE_TOKEN` line uses sed-replace if present, append if not.
+- Bot channel id: looked up fresh each run.
+- Homepage tiles: markered block-replace.
+- mm-latest-bot-post.service is `systemctl restart`'d on every run so changes to MM_TOKEN propagate.
 
 ---
 
