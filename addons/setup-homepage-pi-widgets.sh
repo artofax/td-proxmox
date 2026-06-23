@@ -372,7 +372,12 @@ fi
 
 if (( WITH_LATEST_TILE )); then
   INCLUDED_TILES="$INCLUDED_TILES latest"
-  LATEST_TILE_INNER="    - Latest in #bot:
+  # NOTE: service name MUST be quoted — '#' preceded by whitespace starts a
+  # YAML comment, so an unquoted "Latest in #bot:" parses as
+  # "Latest in" + comment "bot:" which leaves the sequence item malformed
+  # and js-yaml reports "bad indentation of a sequence entry" at the
+  # following line. (Caught by user 2026-06-23.)
+  LATEST_TILE_INNER="    - \"Latest in #bot\":
         href: http://mattermost:8065/td-homelab/channels/bot
         description: Most recent Bot Posts message
         icon: mattermost.png
