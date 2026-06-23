@@ -1,6 +1,6 @@
 --- /tmp/package/dist/extension.js	1985-10-26 08:15:00.000000000 +0000
-+++ /root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost/dist/extension.js	2026-06-18 22:35:40.009084985 +0000
-@@ -308,6 +308,36 @@
++++ /root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost/dist/extension.js	2026-06-22 17:00:00.000000000 +0000
+@@ -308,6 +308,40 @@
              ctx.ui.notify(`Disconnected from ${session.channelName}`, "info");
          },
      });
@@ -10,9 +10,18 @@
 +    if (autoConnect) {
 +        pi.on("session_start", async (_event, ctx) => {
 +            if (currentSession) return; // already connected
-+            const projectPath = ctx.cwd;
++            // ctx.cwd is "/" when pi is launched from systemd or `pct enter`
++            // directly. In that case basename(projectPath) is empty and
++            // Mattermost rejects channel creation with "Invalid or missing
++            // display_name". Fall back to /var/pi/bot so the bridge binds
++            // to the pre-created "bot" channel (pre-seeded in channel_mappings
++            // by setup-pi-mattermost-bridge.sh).
++            let projectPath = ctx.cwd;
++            if (!projectPath || projectPath === "/" || projectPath.replace(/\/+$/, "") === "") {
++                projectPath = "/var/pi/bot";
++            }
 +            const sessionId = crypto.randomUUID();
-+            ctx.ui.notify("Auto-connecting to Mattermost...", "info");
++            ctx.ui.notify(`Auto-connecting to Mattermost (project: ${projectPath})...`, "info");
 +            const res = await bridgeFetch("/api/register-session", {
 +                projectPath,
 +                sessionId,

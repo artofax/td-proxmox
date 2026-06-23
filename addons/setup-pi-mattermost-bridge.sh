@@ -21,12 +21,16 @@
 #   3. Installs @whonixnetworks/pi-mattermost via pi's npm
 #      (lands at /root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost)
 #   4. Applies our 3 local patches to that install — debug logging +
-#      PI_MATTERMOST_AUTO_CONNECT env var support
+#      PI_MATTERMOST_AUTO_CONNECT env var support + projectPath="/" fallback
+#      to /var/pi/bot
 #   5. Writes ~/.config/pi-mattermost/config.toml populated from td-tokens.txt
 #   6. Installs the systemd unit at /etc/systemd/system/pi-mattermost.service
 #   7. Adds 'export PI_MATTERMOST_AUTO_CONNECT=1' to /root/.bashrc on the
 #      pi host so any new pi session connects automatically
 #   8. systemctl daemon-reload + enable --now pi-mattermost
+#   9. Looks up the #bot channel id via Mattermost REST API and INSERTs a
+#      channel_mappings row in the bridge's sessions.db so pi's default
+#      auto-connect (projectPath=/var/pi/bot) resolves straight to #bot
 #
 # Usage:
 #   ./setup-pi-mattermost-bridge.sh             # default: install end-to-end
@@ -398,6 +402,64 @@ if (( ! DRY_RUN )); then
   pct exec "$PI_CTID" -- journalctl -u pi-mattermost --no-pager -n 10 2>/dev/null | sed 's/^/    /' || true
 fi
 
+# ----- 9. pre-bind the /var/pi/bot project path to the #bot channel ------
+# The auto-connect block in our patched extension falls back to projectPath
+# "/var/pi/bot" when ctx.cwd is "/" (which is true under both `pct enter` and
+# the systemd-spawned shell). basename("/var/pi/bot") = "bot", so we want
+# pi's session to bind to the pre-existing #bot channel (display name
+# "Bot Posts") that setup-mattermost.sh creates.
+#
+# To skip the bridge's name-based channel lookup (which would also work, but
+# requires the bot token to still be valid), we pre-insert a row into the
+# bridge's channel_mappings table directly. This makes inbound user posts in
+# #bot route to pi immediately on first connect.
+#
+# Idempotent: INSERT OR REPLACE — re-running just refreshes the mapping if
+# the channel id ever changes (e.g. after a Mattermost rebuild).
+log "Pre-binding /var/pi/bot → #bot channel in bridge sessions.db..."
+if (( ! DRY_RUN )); then
+  # 9a. Make sure sqlite3 is available in the CT (debian-12 LXC templates omit it)
+  pct exec "$PI_CTID" -- bash -lc 'command -v sqlite3 >/dev/null || \
+    (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3 >/dev/null)'
+
+  # 9b. Look up the bot channel id from Mattermost.
+  # We query from the PVE host (curl is reliably there). The MM CT is on the
+  # same vmbr0 / Tailscale fabric as the PVE host, so $MM_URL resolves.
+  BOT_CHANNEL_ID="$(curl -fsS \
+    -H "Authorization: Bearer $MM_BOT_TOKEN" \
+    "$MM_URL/api/v4/teams/$MM_TEAM_ID/channels/name/bot" 2>/dev/null \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("id",""))' \
+    2>/dev/null || true)"
+
+  if [[ -z "$BOT_CHANNEL_ID" ]]; then
+    warn "  Could not look up #bot channel id from Mattermost."
+    warn "  Verify: MM_URL=$MM_URL, team_id=$MM_TEAM_ID, MM_BOT_TOKEN is valid."
+    warn "  Skipping channel pre-bind — pi auto-connect will fall back to the"
+    warn "  bridge's name-based lookup at first session (also works, but slower"
+    warn "  and depends on the bot token still being valid)."
+  else
+    log "  Bot channel id: $BOT_CHANNEL_ID"
+
+    # 9c. INSERT into channel_mappings. Wait briefly for the bridge to have
+    # created the DB on first start, then upsert.
+    pct exec "$PI_CTID" -- bash -lc "
+      for i in 1 2 3 4 5; do
+        [[ -f /root/.local/share/pi-mattermost/sessions.db ]] && break
+        sleep 1
+      done
+      if [[ -f /root/.local/share/pi-mattermost/sessions.db ]]; then
+        sqlite3 /root/.local/share/pi-mattermost/sessions.db \\
+          \"INSERT OR REPLACE INTO channel_mappings(project_path, channel_id, channel_name) VALUES ('/var/pi/bot', '$BOT_CHANNEL_ID', 'bot');\"
+        echo '    ✓ channel_mappings row inserted'
+        sqlite3 -header -column /root/.local/share/pi-mattermost/sessions.db \\
+          \"SELECT * FROM channel_mappings WHERE project_path = '/var/pi/bot';\" | sed 's/^/    /'
+      else
+        echo '    ✗ sessions.db never created — bridge may have failed to start.' >&2
+      fi
+    "
+  fi
+fi
+
 # ----- done --------------------------------------------------------------
 log "================================================================"
 log "==> Done."
@@ -410,17 +472,22 @@ log "     sessions won't see the new package until relaunched.)"
 log " "
 log "  2. Inside any pi session on ollama-pi-agent, the bridge will"
 log "     auto-connect on session start (PI_MATTERMOST_AUTO_CONNECT=1)."
-log "     Pi posts 'Auto-connecting to Mattermost...' as confirmation."
-log "     The [Extensions] header on launch should now list both:"
+log "     Pi posts 'Auto-connecting to Mattermost (project: …)' as"
+log "     confirmation. The [Extensions] header on launch should list both:"
 log "       @ollama/pi-web-search"
 log "       @whonixnetworks/pi-mattermost"
 log " "
-log "  3. Each connected pi session gets its own Mattermost channel —"
-log "     named after the project path. Type in the channel to send to pi."
+log "  3. Channel routing:"
+log "     - pi launched from / (default for \`pct enter\`) → binds to the"
+log "       #bot channel (display name 'Bot Posts'). This is the canonical"
+log "       conversation channel."
+log "     - pi launched from a project dir (cd /root/myproj && ollama launch pi)"
+log "       → bridge creates a new channel named after the project basename"
+log "       (e.g. 'myproj'). Useful for per-project chats."
 log " "
-log "  3. To verify end-to-end:"
-log "     - In Mattermost UI, find the auto-created channel"
-log "     - Post a message there"
+log "  4. To verify end-to-end:"
+log "     - In Mattermost UI, open Bot Posts"
+log "     - Post a message there (e.g. '@pi-bot hello')"
 log "     - Pi receives it; its response posts back to the same channel"
 log " "
 log "Service management:"

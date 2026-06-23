@@ -622,6 +622,123 @@ This separation means a token leak from one doesn't compromise the other. Pi aut
 
 ---
 
+## `setup-pi-mattermost-bridge.sh`
+
+Wire **bidirectional** chat between pi (on `ollama-pi-agent`) and the Mattermost CT you stood up with `setup-mattermost.sh`. After this addon runs, opening a pi session auto-connects pi to the `#bot` channel, and posts in that channel get routed straight into pi's input — type "what's running on the sandbox CT?" in Mattermost, pi reads it and responds in the same channel.
+
+Without this addon you only have outbound chat (pi can `curl POST /api/v4/posts` to drop status messages in `#bot`). With it, you have a **conversational interface** to pi from any device that can reach Mattermost — phone, laptop, browser, anywhere.
+
+**What it does, end to end:**
+
+1. Verifies prerequisites: `ollama-pi-agent` and `mattermost` CTs exist + are running, `/root/td-tokens.txt` has the four `MATTERMOST_*` lines `setup-mattermost.sh` wrote.
+2. Installs `@whonixnetworks/pi-mattermost@1.5.0` locally into `/root/.pi/agent/npm/node_modules/` via pi's bundled `npm` (not `npm -g` — see "quirks" below).
+3. Applies three local patches (in `pi-mattermost-bridge/patches/`):
+   - `01-message-router-debug-logging.patch` — bridge-side WS event logging
+   - `02-extension-auto-connect.patch` — adds the `PI_MATTERMOST_AUTO_CONNECT` env-var-driven auto-connect block to `dist/extension.js`
+   - `03-extension-ts-auto-connect.patch` — same block in `src/extension.ts` (pi loads `.ts` directly via its bundled TS runtime)
+4. Registers `npm:@whonixnetworks/pi-mattermost` in `~/.pi/agent/settings.json` (pi doesn't auto-scan `node_modules` — explicit registration is required, including the `npm:` source prefix).
+5. Writes `~/.config/pi-mattermost/config.toml` from the `/root/td-tokens.txt` values.
+6. Installs `pi-mattermost.service` as a system-level systemd unit (port 4000, bound to `127.0.0.1`).
+7. Adds `export PI_MATTERMOST_AUTO_CONNECT=1` to `/root/.bashrc` so any pi session triggers auto-connect on startup.
+8. Looks up the `#bot` channel id from Mattermost (`GET /api/v4/teams/{team_id}/channels/name/bot`) and **pre-binds** `/var/pi/bot → channel_id` in the bridge's `channel_mappings` SQLite table — so pi's auto-connect resolves immediately to the right channel without an extra round-trip.
+
+**Prereqs:**
+
+- `setup-mattermost.sh` finished successfully on this PVE host
+- `/root/td-tokens.txt` has `MATTERMOST_BOT_TOKEN`, `MATTERMOST_BOT_USER_ID`, `MATTERMOST_TEAM_ID`, `MATTERMOST_URL`
+- pi installed on `ollama-pi-agent` (i.e., `setup-ollama-pi.sh` was run)
+
+**Install:**
+
+```bash
+./addons/setup-pi-mattermost-bridge.sh
+```
+
+About 3 minutes. The end-of-run banner explains how to use it.
+
+**Flags:**
+
+| Flag | What it does |
+|---|---|
+| `--dry-run` | Print every action without executing — useful for previewing on a fresh CT |
+| `--uninstall` | Stop the systemd service, remove the unit, strip `PI_MATTERMOST_AUTO_CONNECT` from `/root/.bashrc`, unregister the package from pi's `settings.json`. Leaves the npm install + DB in place for fast reinstall via re-running. |
+
+**Channel routing — how pi picks where to chat:**
+
+The bridge supports two modes, picked by where pi was launched from:
+
+- **Default mode** — pi launched from `/` (the default for `pct enter` and any systemd-spawned shell). The auto-connect block detects `ctx.cwd === "/"` and falls back to `projectPath = "/var/pi/bot"`. The bridge looks up this project path in `channel_mappings` (pre-bound by step 8 above), finds the `#bot` channel id, and binds the session to it. **This is what 99% of users want** — one canonical conversation channel.
+- **Per-project mode** — pi launched from a real directory: `cd /root/myproject && ollama launch pi`. `ctx.cwd === "/root/myproject"`, basename is `myproject`, the bridge creates (or finds) a `#myproject` channel and binds the session there. Useful if you want per-project chats that don't all pile into `#bot`.
+
+**Bridge architecture, in one diagram:**
+
+```
+                          ┌─────────────────┐
+                          │   Mattermost    │
+                          │   (CT 207)      │
+                          └────┬────────────┘
+                               │ WebSocket (posts/typing/status events)
+                               │ REST API (post messages, get/create channels)
+                               │
+                          ┌────▼────────────┐    Unix-domain :4000
+                          │ pi-mattermost   │◄──────────────────┐
+                          │   bridge        │                   │
+                          │  (systemd)      │                   │
+                          └────┬────────────┘                   │
+                               │                                │
+                               │ session.messages              poll
+                               │ (in-memory queue,             every
+                               │  per registered sessionId)    1s
+                               │                                │
+                          ┌────▼────────────┐                   │
+                          │ SQLite          │              ┌────┴────┐
+                          │ sessions.db     │              │   pi    │
+                          │  - sessions     │              │ session │
+                          │  - channel_     │              └─────────┘
+                          │    mappings     │
+                          └─────────────────┘
+```
+
+When a user posts in `#bot`, the WS event arrives at the bridge → `message-router.js` filters out the bot's own posts and non-public channels → `queueIncomingMessage(channelId, ...)` finds the matching session and appends to its in-memory message list → pi's next poll drains the queue → pi handles the message.
+
+When pi posts back, the extension calls `bridgeFetch("/api/stream-output", ...)` → bridge calls Mattermost's REST `POST /api/v4/posts` against the bound channel.
+
+**Quirks the script handles for you:**
+
+1. **`pi` doesn't auto-scan `node_modules`.** Packages must be explicitly listed in `~/.pi/agent/settings.json` under `"packages"`, and the identifier must include a source prefix (`npm:` for npm packages). The script adds the prefixed form AND removes any stale bare entry from prior runs.
+2. **`npm -g` lands in the wrong place.** Pi's `npm` uses its own prefix at `/root/.local/share/pi-node/node-v*/lib/node_modules/` for globals, but our bundled patches reference absolute paths under `/root/.pi/agent/npm/`. So the script does `cd /root/.pi/agent/npm && npm install <pkg>` (no `-g`), which lands the package at the path the patches expect.
+3. **Patch headers use absolute paths.** Neither `git apply -p1` nor `patch -p1` can find target files from `--- /tmp/package/dist/extension.js`. The script `sed`-rewrites headers to standard git-diff form (`a/dist/extension.js` / `b/dist/extension.js`) before applying.
+4. **Bridge sessions are in-memory only.** Restarting `pi-mattermost.service` clears the `externalSessions` map. The SQLite `sessions` table persists rows, but `getOrCreateChannel` doesn't auto-load them on bridge startup — they're only re-created when pi calls `/api/register-session` again. This means relaunching pi after a bridge restart re-registers the session cleanly; no manual sync needed.
+5. **The bridge's `display_name` rule is invisible.** Mattermost's `createChannel` API rejects empty `display_name`, and the bridge derives `display_name = basename(projectPath)` internally — ignoring any `display_name` field in the request body. If pi launches from `/`, `basename("/")` is empty and the API returns `"Invalid or missing display_name in request body."` — surfacing as a `status 500` to pi. Our patched auto-connect block dodges this with the `/var/pi/bot` fallback for `cwd === "/"`.
+6. **First pi launch after `--uninstall` needs a relaunch.** Pi caches the loaded extension list at startup; uninstalling the package mid-session won't unload it. Exit and relaunch pi to drop the matter extension.
+
+**Service management:**
+
+```bash
+PI_CTID=$(pct list | awk '$3=="ollama-pi-agent" {print $1}')
+pct exec $PI_CTID -- systemctl status pi-mattermost
+pct exec $PI_CTID -- journalctl -u pi-mattermost -f
+pct exec $PI_CTID -- systemctl restart pi-mattermost
+```
+
+**Verifying end-to-end:**
+
+1. On any pi-equipped CT: `ollama launch pi`. Watch for `Auto-connecting to Mattermost (project: /var/pi/bot)...` then `Connected to Mattermost channel: bot`.
+2. In Mattermost UI: open Bot Posts (display name for the `#bot` channel). Post `hello pi`. Pi sees it and responds in the same channel.
+
+**Re-run safety:**
+
+The whole script is idempotent. Re-running:
+
+- Detects existing npm install at `/root/.pi/agent/npm/node_modules/@whonixnetworks/pi-mattermost` and skips reinstall (force-bump via the printed command).
+- Patches: each tried with `git apply --check` first, then `patch --dry-run`, then `git apply --check --reverse` to detect already-applied state.
+- `settings.json` entry: only adds if missing; removes stale bare entry.
+- `channel_mappings` row: `INSERT OR REPLACE` — refreshes if the bot channel id ever changes.
+- systemd unit: written every run (template-rendered with current node binary path).
+- `/root/.bashrc` export: `grep -q` before append.
+
+---
+
 ## Setting up a USB drive as a backup target
 
 `setup-pve-etc-backup.sh` (and `vzdump`) need somewhere to write. If you haven't already prepped a USB drive on the PVE host, the short version:
