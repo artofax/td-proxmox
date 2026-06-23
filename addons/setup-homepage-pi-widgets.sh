@@ -151,7 +151,8 @@ if (( UNINSTALL )); then
   ' 2>/dev/null | tail -n1)"
 
   if [[ -n "$services_file" ]] && (( ! DRY_RUN )); then
-    for marker in "# TD-Addon: pi-bridge" "# TD-Addon: mm-latest-post"; do
+    # Cover legacy markers (pre-consolidation) AND the current combined marker.
+    for marker in "# TD-Addon: pi-bridge" "# TD-Addon: mm-latest-post" "# TD-Addon: pi-widgets"; do
       pct exec "$HP_CTID" -- bash -lc "awk -v m='$marker' '
         \$0 ~ m { in_block=1; next }
         in_block && \$0 ~ /^# TD-Addon:/ { in_block=0 }
@@ -335,12 +336,21 @@ log "  services.yaml: $services_file"
 # Read PI_BRIDGE_TOKEN from td-tokens.txt (just wrote it above)
 BRIDGE_TOKEN_FOR_TILE="$(read_token PI_BRIDGE_TOKEN || true)"
 
-# Define both tile blocks
-BRIDGE_TILE_MARKER="# TD-Addon: pi-bridge"
-BRIDGE_TILE_BLOCK=""
+# Build a SINGLE combined "AI Agents" block containing both tiles. Emitting
+# two separate `- AI Agents:` top-level sequence items breaks js-yaml
+# (Homepage's parser) with 'bad indentation of a sequence entry' even though
+# YAML allows duplicate keys in a sequence. Consolidating both tiles under
+# one group avoids the ambiguity entirely AND looks better in the UI.
+COMBINED_MARKER="# TD-Addon: pi-widgets"
+COMBINED_TILE_BLOCK=""
+
+# Render each tile's INNER body (without the group wrapper) only if enabled
+# and prerequisites are met.
+INCLUDED_TILES=""
+
 if (( WITH_BRIDGE_TILE )) && [[ -n "$BRIDGE_TOKEN_FOR_TILE" ]]; then
-  BRIDGE_TILE_BLOCK="- AI Agents:
-    - Pi Bridge:
+  INCLUDED_TILES="$INCLUDED_TILES bridge"
+  BRIDGE_TILE_INNER="    - Pi Bridge:
         href: http://ollama-pi-agent:9092
         description: pi ↔ Mattermost bridge daemon
         icon: ollama.png
@@ -360,11 +370,9 @@ if (( WITH_BRIDGE_TILE )) && [[ -n "$BRIDGE_TOKEN_FOR_TILE" ]]; then
               label: Orphans"
 fi
 
-LATEST_TILE_MARKER="# TD-Addon: mm-latest-post"
-LATEST_TILE_BLOCK=""
 if (( WITH_LATEST_TILE )); then
-  LATEST_TILE_BLOCK="- AI Agents:
-    - Latest in #bot:
+  INCLUDED_TILES="$INCLUDED_TILES latest"
+  LATEST_TILE_INNER="    - Latest in #bot:
         href: http://mattermost:8065/td-homelab/channels/bot
         description: Most recent Bot Posts message
         icon: mattermost.png
@@ -381,10 +389,23 @@ if (( WITH_LATEST_TILE )); then
               format: relativeDate"
 fi
 
-# Helper: replace an existing TD-Addon block, or append if absent.
-write_tile() {
+if [[ -n "$INCLUDED_TILES" ]]; then
+  COMBINED_TILE_BLOCK="- AI Agents:"
+  [[ -n "${BRIDGE_TILE_INNER:-}" ]] && COMBINED_TILE_BLOCK="$COMBINED_TILE_BLOCK
+$BRIDGE_TILE_INNER"
+  [[ -n "${LATEST_TILE_INNER:-}" ]] && COMBINED_TILE_BLOCK="$COMBINED_TILE_BLOCK
+$LATEST_TILE_INNER"
+fi
+
+# Helper: replace existing TD-Addon blocks, or append if absent.
+# Strips ALL legacy markers (pi-bridge, mm-latest-post) AND the current
+# combined marker (pi-widgets), then re-appends the combined block.
+write_combined_tile() {
   local marker="$1" block="$2"
-  [[ -z "$block" ]] && return 0
+  [[ -z "$block" ]] && {
+    log "  No tiles enabled — skipping write."
+    return 0
+  }
 
   (( DRY_RUN )) && {
     log "  [dry-run] would write $marker"
@@ -392,23 +413,24 @@ write_tile() {
     return 0
   }
 
-  # Surgical block-replace if marker exists
-  if pct exec "$HP_CTID" -- grep -qF "$marker" "$services_file" 2>/dev/null; then
-    log "  Updating existing $marker block..."
-    pct exec "$HP_CTID" -- bash -lc "awk -v m='$marker' '
-      \$0 ~ m { in_block=1; next }
-      in_block && \$0 ~ /^# TD-Addon:/ { in_block=0 }
-      !in_block { print }
-    ' '$services_file' > /tmp/services.yaml.new && mv /tmp/services.yaml.new '$services_file'"
-  else
-    log "  Adding $marker block..."
-  fi
+  # Strip legacy markered blocks (pre-v2 of this script) AND current marker.
+  # This keeps the file clean across upgrades from any previous version.
+  for m in "# TD-Addon: pi-bridge" "# TD-Addon: mm-latest-post" "$marker"; do
+    if pct exec "$HP_CTID" -- grep -qF "$m" "$services_file" 2>/dev/null; then
+      log "  Removing existing $m block..."
+      pct exec "$HP_CTID" -- bash -lc "awk -v m='$m' '
+        \$0 ~ m { in_block=1; next }
+        in_block && \$0 ~ /^# TD-Addon:/ { in_block=0 }
+        !in_block { print }
+      ' '$services_file' > /tmp/services.yaml.new && mv /tmp/services.yaml.new '$services_file'"
+    fi
+  done
 
+  log "  Appending $marker block..."
   printf '\n%s\n%s\n' "$marker" "$block" | pct exec "$HP_CTID" -- tee -a "$services_file" >/dev/null
 }
 
-write_tile "$BRIDGE_TILE_MARKER" "$BRIDGE_TILE_BLOCK"
-write_tile "$LATEST_TILE_MARKER" "$LATEST_TILE_BLOCK"
+write_combined_tile "$COMBINED_MARKER" "$COMBINED_TILE_BLOCK"
 
 # Reload Homepage to pick up new tiles
 if (( ! DRY_RUN )); then
