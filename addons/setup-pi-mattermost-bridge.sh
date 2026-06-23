@@ -39,9 +39,11 @@
 # Usage:
 #   ./setup-pi-mattermost-bridge.sh             # default: install end-to-end
 #                                                # (including pi-bot daemon)
-#   ./setup-pi-mattermost-bridge.sh --no-daemon # skip pi-bot.service install
-#   ./setup-pi-mattermost-bridge.sh --dry-run   # preview
-#   ./setup-pi-mattermost-bridge.sh --uninstall # stop services + remove units
+#   ./setup-pi-mattermost-bridge.sh --no-daemon  # skip pi-bot.service install
+#   ./setup-pi-mattermost-bridge.sh --model NAME # override model (default:
+#                                                # pi settings.json defaultModel)
+#   ./setup-pi-mattermost-bridge.sh --dry-run    # preview
+#   ./setup-pi-mattermost-bridge.sh --uninstall  # stop services + remove units
 #                                                # (leaves npm package + patches
 #                                                # in place; reinstall via re-run)
 
@@ -51,6 +53,7 @@ set -Eeuo pipefail
 DRY_RUN=0
 UNINSTALL=0
 WITH_DAEMON=1   # install pi-bot.service by default; --no-daemon opts out
+PI_MODEL=""     # auto-detect from pi's settings.json; --model overrides
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSETS_DIR="$SCRIPT_DIR/pi-mattermost-bridge"
 TOKENS_FILE="/root/td-tokens.txt"
@@ -61,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --uninstall)  UNINSTALL=1; shift ;;
     --no-daemon)  WITH_DAEMON=0; shift ;;
     --with-daemon) WITH_DAEMON=1; shift ;;
+    --model)      PI_MODEL="$2"; shift 2 ;;
     -h|--help)    sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -493,9 +497,35 @@ if (( WITH_DAEMON )); then
   run "pct exec $PI_CTID -- bash -lc 'command -v tmux >/dev/null || \
     (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null)'"
 
-  # 10b. Render the unit with our resolved Node bin dir (for PATH).
+  # 10b. Resolve the model to launch pi with.
+  # Order of precedence: --model CLI flag → pi's settings.json defaultModel
+  # → hardcoded fallback. Without explicit --model on the launch line, pi
+  # shows its interactive model picker on every daemon start — even with
+  # models.json populated.
+  if [[ -z "$PI_MODEL" ]]; then
+    PI_MODEL="$(pct exec "$PI_CTID" -- bash -lc '
+      python3 -c "
+import json, sys
+try:
+    with open(\"/root/.pi/agent/settings.json\") as f:
+        d = json.load(f)
+    m = d.get(\"defaultModel\", \"\")
+    print(m)
+except Exception:
+    pass
+" 2>/dev/null
+    ' 2>/dev/null || true)"
+  fi
+  if [[ -z "$PI_MODEL" ]]; then
+    PI_MODEL="gemma4:31b-cloud"
+    warn "  No defaultModel in /root/.pi/agent/settings.json — falling back to $PI_MODEL"
+  fi
+  log "  pi-bot will launch with model: $PI_MODEL"
+
+  # 10c. Render the unit with our resolved Node bin dir + model.
   PI_BOT_UNIT="$(sed \
     -e "s|%%NODE_BIN_DIR%%|$NODE_BIN_DIR|g" \
+    -e "s|%%PI_MODEL%%|$PI_MODEL|g" \
     "$ASSETS_DIR/pi-bot.service")"
 
   if (( ! DRY_RUN )); then

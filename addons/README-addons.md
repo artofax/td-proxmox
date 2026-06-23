@@ -663,6 +663,7 @@ About 3 minutes. The end-of-run banner explains how to use it.
 |---|---|
 | `--no-daemon` | Skip installing `pi-bot.service`. Use if you only want the bridge available for on-demand sessions and don't want pi running headless 24/7. |
 | `--with-daemon` | Explicitly opt in to the `pi-bot.service` install (default behavior — included for symmetry). |
+| `--model NAME` | Model name passed to `ollama launch pi --model`. Default: auto-detected from `/root/.pi/agent/settings.json`'s `defaultModel`, falling back to `gemma4:31b-cloud`. Without an explicit `--model` on the launch line, pi shows its interactive picker on every daemon start (the `models.json` state isn't honored for non-interactive launches). |
 | `--dry-run` | Print every action without executing — useful for previewing on a fresh CT |
 | `--uninstall` | Stop both `pi-mattermost` and `pi-bot` services, remove the units, kill the `pi-bot` tmux session, strip `PI_MATTERMOST_AUTO_CONNECT` from `/root/.bashrc`, unregister the package from pi's `settings.json`. Leaves the npm install + DB in place for fast reinstall via re-running. |
 
@@ -675,7 +676,8 @@ This is what makes pi "live" 24/7 inside Mattermost. Architecture:
 │  pi-bot.service  (systemd, Type=forking, RemainAfterExit)   │
 │                                                             │
 │     ExecStart:  tmux new-session -d -s pi-bot               │
-│                 "cd / && ollama launch pi"                  │
+│                 "cd / && ollama launch pi                   │
+│                          --model gemma4:31b-cloud --yes"    │
 │                                                             │
 │     ┌──────────────────────────────────────────────────┐    │
 │     │  tmux session 'pi-bot'                           │    │
@@ -695,7 +697,11 @@ This is what makes pi "live" 24/7 inside Mattermost. Architecture:
 
 **Why tmux?** Pi is a TUI. It needs a pseudo-terminal (`pty`). Raw systemd `Type=simple` with `ExecStart=ollama launch pi` doesn't allocate one — pi either exits with "not a tty" or behaves erratically. `tmux new-session -d` allocates a pty AND immediately detaches, which satisfies systemd's `Type=forking` while leaving pi running inside.
 
-**Default model:** pi reads its default model from `~/.pi/agent/settings.json` (set to `gemma4:31b-cloud` by `setup-ollama-pi.sh`). To use a different model permanently, edit that file. To override per-session, you'd need to launch pi manually with the appropriate flag — but that defeats the daemon's purpose.
+**Default model:** the unit's `ExecStart` runs `ollama launch pi --model <NAME> --yes`. `<NAME>` is rendered into the unit by the install script from (in order of precedence): the `--model` CLI flag, then `/root/.pi/agent/settings.json`'s `defaultModel`, then a hardcoded `gemma4:31b-cloud`. `--yes` auto-confirms the "Update Available" banner pi shows on launch.
+
+Why explicit `--model`? Even with `models.json` populated and `settings.json` showing the right `defaultModel`, pi's interactive launcher shows its model picker on every restart. The `--model` flag bypasses that picker entirely — the TUI proceeds straight to extension load and auto-connect.
+
+To switch models later: re-run the addon with `--model NEW_NAME` (it'll re-render the unit). Or hand-edit `/etc/systemd/system/pi-bot.service` + `systemctl daemon-reload && systemctl restart pi-bot`.
 
 **Attaching to the live session:**
 
