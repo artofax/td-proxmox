@@ -31,11 +31,17 @@
 #   9. Looks up the #bot channel id via Mattermost REST API and INSERTs a
 #      channel_mappings row in the bridge's sessions.db so pi's default
 #      auto-connect (projectPath=/var/pi/bot) resolves straight to #bot
+#  10. Installs pi-bot.service — a tmux-hosted persistent pi session that
+#      auto-starts at CT boot and registers with the bridge. Without this,
+#      inbound posts to #bot drop on the floor when nobody has pi open.
+#      Skip with --no-daemon if you only want manual interactive pi sessions.
 #
 # Usage:
 #   ./setup-pi-mattermost-bridge.sh             # default: install end-to-end
+#                                                # (including pi-bot daemon)
+#   ./setup-pi-mattermost-bridge.sh --no-daemon # skip pi-bot.service install
 #   ./setup-pi-mattermost-bridge.sh --dry-run   # preview
-#   ./setup-pi-mattermost-bridge.sh --uninstall # stop service + remove unit
+#   ./setup-pi-mattermost-bridge.sh --uninstall # stop services + remove units
 #                                                # (leaves npm package + patches
 #                                                # in place; reinstall via re-run)
 
@@ -44,15 +50,18 @@ set -Eeuo pipefail
 # ----- args --------------------------------------------------------------
 DRY_RUN=0
 UNINSTALL=0
+WITH_DAEMON=1   # install pi-bot.service by default; --no-daemon opts out
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSETS_DIR="$SCRIPT_DIR/pi-mattermost-bridge"
 TOKENS_FILE="/root/td-tokens.txt"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dry-run)   DRY_RUN=1; shift ;;
-    --uninstall) UNINSTALL=1; shift ;;
-    -h|--help)   sed -n '2,35p' "$0"; exit 0 ;;
+    --dry-run)    DRY_RUN=1; shift ;;
+    --uninstall)  UNINSTALL=1; shift ;;
+    --no-daemon)  WITH_DAEMON=0; shift ;;
+    --with-daemon) WITH_DAEMON=1; shift ;;
+    -h|--help)    sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -120,6 +129,10 @@ log "  Team id:         $MM_TEAM_ID"
 # ----- uninstall path ----------------------------------------------------
 if (( UNINSTALL )); then
   log "Uninstalling pi-mattermost bridge service..."
+  # Stop pi-bot first so it doesn't try to reconnect mid-uninstall
+  run "pct exec $PI_CTID -- systemctl disable --now pi-bot 2>/dev/null || true"
+  run "pct exec $PI_CTID -- bash -c 'tmux kill-session -t pi-bot 2>/dev/null || true'"
+  run "pct exec $PI_CTID -- rm -f /etc/systemd/system/pi-bot.service"
   run "pct exec $PI_CTID -- systemctl disable --now pi-mattermost 2>/dev/null || true"
   run "pct exec $PI_CTID -- rm -f /etc/systemd/system/pi-mattermost.service"
   run "pct exec $PI_CTID -- systemctl daemon-reload"
@@ -460,39 +473,121 @@ if (( ! DRY_RUN )); then
   fi
 fi
 
+# ----- 10. install pi-bot.service (headless tmux-hosted pi) --------------
+# Makes pi auto-start at CT boot inside a tmux session, so the Mattermost
+# bridge has a session to route to even when no human has opened a pi
+# terminal. Without this, the bridge sees inbound posts but has no
+# registered session — messages silently drop.
+#
+# Why tmux? pi is a TUI and needs a pty. Raw systemd Type=simple ExecStart
+# doesn't allocate one; the TUI either exits or behaves erratically.
+# tmux new-session -d gives it a pty AND backgrounds itself, satisfying
+# Type=forking.
+#
+# Skip with --no-daemon if you only want the bridge running and prefer
+# manual `ollama launch pi` in `pct enter` for interactive use.
+if (( WITH_DAEMON )); then
+  log "Installing pi-bot.service (persistent headless pi for #bot channel)..."
+
+  # 10a. tmux is required and not in the minimal debian-12 LXC template.
+  run "pct exec $PI_CTID -- bash -lc 'command -v tmux >/dev/null || \
+    (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null)'"
+
+  # 10b. Render the unit with our resolved Node bin dir (for PATH).
+  PI_BOT_UNIT="$(sed \
+    -e "s|%%NODE_BIN_DIR%%|$NODE_BIN_DIR|g" \
+    "$ASSETS_DIR/pi-bot.service")"
+
+  if (( ! DRY_RUN )); then
+    printf '%s\n' "$PI_BOT_UNIT" | pct exec "$PI_CTID" -- tee /etc/systemd/system/pi-bot.service >/dev/null
+    pct exec "$PI_CTID" -- systemctl daemon-reload
+    pct exec "$PI_CTID" -- systemctl enable pi-bot.service 2>&1 | sed 's/^/    /' || true
+    pct exec "$PI_CTID" -- systemctl restart pi-bot.service
+
+    # Give pi a few seconds to launch + register with the bridge
+    sleep 5
+
+    # Verify the tmux session exists
+    if pct exec "$PI_CTID" -- tmux has-session -t pi-bot 2>/dev/null; then
+      log "  ✓ tmux session 'pi-bot' is running"
+      log "    Attach with: pct exec $PI_CTID -- tmux attach -t pi-bot"
+      log "    (Ctrl-b d to detach without killing the session.)"
+    else
+      warn "  ✗ tmux session 'pi-bot' not found after start."
+      warn "    Inspect: pct exec $PI_CTID -- journalctl -u pi-bot --no-pager -n 30"
+    fi
+
+    # Confirm pi registered with the bridge
+    if pct exec "$PI_CTID" -- sqlite3 /root/.local/share/pi-mattermost/sessions.db \
+        "SELECT 1 FROM sessions WHERE project_path = '/var/pi/bot' LIMIT 1" 2>/dev/null | grep -q 1; then
+      log "  ✓ pi session registered with bridge against /var/pi/bot"
+    else
+      warn "  ✗ No bridge session yet for /var/pi/bot — pi may still be starting."
+      warn "    Re-check in ~30s with:"
+      warn "      pct exec $PI_CTID -- sqlite3 -header -column \\"
+      warn "        /root/.local/share/pi-mattermost/sessions.db \\"
+      warn "        'SELECT session_id, project_path, channel_name FROM sessions'"
+    fi
+  fi
+else
+  log "Skipping pi-bot.service install (--no-daemon)."
+  log "  Pi will only connect when YOU run \`ollama launch pi\` manually."
+fi
+
 # ----- done --------------------------------------------------------------
 log "================================================================"
 log "==> Done."
 log " "
 log "Bridge is now running. To use it:"
 log " "
-log "  1. Restart any open pi sessions so they pick up the newly-registered"
-log "     extension. (pi reads settings.json at startup only — already-running"
-log "     sessions won't see the new package until relaunched.)"
+if (( WITH_DAEMON )); then
+  log "  1. A persistent pi session is already running inside CT $PI_CTID"
+  log "     under tmux session 'pi-bot', auto-connected to the #bot channel."
+  log "     Just post in Mattermost — no need to launch pi manually."
+  log " "
+  log "  2. To watch / interact with the live pi session:"
+  log "       pct exec $PI_CTID -- tmux attach -t pi-bot"
+  log "       (Ctrl-b then d to detach — leaves pi running.)"
+  log " "
+  log "  3. To verify bidirectional chat:"
+  log "     - Open Mattermost → Bot Posts channel"
+  log "     - Post a message (e.g. '@pi-bot what files are in /root?')"
+  log "     - Pi responds in the same channel"
+else
+  log "  1. Restart any open pi sessions so they pick up the newly-registered"
+  log "     extension. (pi reads settings.json at startup only — already-running"
+  log "     sessions won't see the new package until relaunched.)"
+  log " "
+  log "  2. Inside any pi session on ollama-pi-agent, the bridge will"
+  log "     auto-connect on session start (PI_MATTERMOST_AUTO_CONNECT=1)."
+  log "     Pi posts 'Auto-connecting to Mattermost (project: …)' as"
+  log "     confirmation. The [Extensions] header on launch should list both:"
+  log "       @ollama/pi-web-search"
+  log "       @whonixnetworks/pi-mattermost"
+  log " "
+  log "  3. To verify end-to-end:"
+  log "     - In Mattermost UI, open Bot Posts"
+  log "     - Post a message there (e.g. '@pi-bot hello')"
+  log "     - Pi receives it; its response posts back to the same channel"
+fi
 log " "
-log "  2. Inside any pi session on ollama-pi-agent, the bridge will"
-log "     auto-connect on session start (PI_MATTERMOST_AUTO_CONNECT=1)."
-log "     Pi posts 'Auto-connecting to Mattermost (project: …)' as"
-log "     confirmation. The [Extensions] header on launch should list both:"
-log "       @ollama/pi-web-search"
-log "       @whonixnetworks/pi-mattermost"
-log " "
-log "  3. Channel routing:"
-log "     - pi launched from / (default for \`pct enter\`) → binds to the"
-log "       #bot channel (display name 'Bot Posts'). This is the canonical"
-log "       conversation channel."
-log "     - pi launched from a project dir (cd /root/myproj && ollama launch pi)"
-log "       → bridge creates a new channel named after the project basename"
-log "       (e.g. 'myproj'). Useful for per-project chats."
-log " "
-log "  4. To verify end-to-end:"
-log "     - In Mattermost UI, open Bot Posts"
-log "     - Post a message there (e.g. '@pi-bot hello')"
-log "     - Pi receives it; its response posts back to the same channel"
+log "Channel routing:"
+log "  - pi launched from / (default for the pi-bot daemon AND \`pct enter\`)"
+log "    → binds to the #bot channel (display name 'Bot Posts'). Canonical."
+log "  - pi launched from a project dir (cd /root/myproj && ollama launch pi)"
+log "    → bridge creates a new channel named after the project basename"
+log "    (e.g. 'myproj'). Useful for per-project chats."
 log " "
 log "Service management:"
-log "  status:   pct exec $PI_CTID -- systemctl status pi-mattermost"
-log "  logs:     pct exec $PI_CTID -- journalctl -u pi-mattermost -f"
-log "  restart:  pct exec $PI_CTID -- systemctl restart pi-mattermost"
+log "  bridge:"
+log "    status:   pct exec $PI_CTID -- systemctl status pi-mattermost"
+log "    logs:     pct exec $PI_CTID -- journalctl -u pi-mattermost -f"
+log "    restart:  pct exec $PI_CTID -- systemctl restart pi-mattermost"
+if (( WITH_DAEMON )); then
+log "  pi-bot daemon:"
+log "    status:   pct exec $PI_CTID -- systemctl status pi-bot"
+log "    attach:   pct exec $PI_CTID -- tmux attach -t pi-bot"
+log "    restart:  pct exec $PI_CTID -- systemctl restart pi-bot"
+fi
 log "  uninstall: $(basename "$0") --uninstall"
 log "================================================================"

@@ -634,13 +634,14 @@ Without this addon you only have outbound chat (pi can `curl POST /api/v4/posts`
 2. Installs `@whonixnetworks/pi-mattermost@1.5.0` locally into `/root/.pi/agent/npm/node_modules/` via pi's bundled `npm` (not `npm -g` — see "quirks" below).
 3. Applies three local patches (in `pi-mattermost-bridge/patches/`):
    - `01-message-router-debug-logging.patch` — bridge-side WS event logging
-   - `02-extension-auto-connect.patch` — adds the `PI_MATTERMOST_AUTO_CONNECT` env-var-driven auto-connect block to `dist/extension.js`
+   - `02-extension-auto-connect.patch` — adds the `PI_MATTERMOST_AUTO_CONNECT` env-var-driven auto-connect block to `dist/extension.js`, **plus** a fallback that swaps `projectPath` to `/var/pi/bot` when `ctx.cwd === "/"`
    - `03-extension-ts-auto-connect.patch` — same block in `src/extension.ts` (pi loads `.ts` directly via its bundled TS runtime)
 4. Registers `npm:@whonixnetworks/pi-mattermost` in `~/.pi/agent/settings.json` (pi doesn't auto-scan `node_modules` — explicit registration is required, including the `npm:` source prefix).
 5. Writes `~/.config/pi-mattermost/config.toml` from the `/root/td-tokens.txt` values.
 6. Installs `pi-mattermost.service` as a system-level systemd unit (port 4000, bound to `127.0.0.1`).
 7. Adds `export PI_MATTERMOST_AUTO_CONNECT=1` to `/root/.bashrc` so any pi session triggers auto-connect on startup.
 8. Looks up the `#bot` channel id from Mattermost (`GET /api/v4/teams/{team_id}/channels/name/bot`) and **pre-binds** `/var/pi/bot → channel_id` in the bridge's `channel_mappings` SQLite table — so pi's auto-connect resolves immediately to the right channel without an extra round-trip.
+9. Installs `pi-bot.service` — a `tmux`-hosted persistent pi session that auto-starts at CT boot and registers with the bridge. Without this, the bridge sees inbound posts but has no registered session to deliver them to (they drop on the floor). Skippable with `--no-daemon` if you only want manual interactive pi sessions.
 
 **Prereqs:**
 
@@ -660,8 +661,63 @@ About 3 minutes. The end-of-run banner explains how to use it.
 
 | Flag | What it does |
 |---|---|
+| `--no-daemon` | Skip installing `pi-bot.service`. Use if you only want the bridge available for on-demand sessions and don't want pi running headless 24/7. |
+| `--with-daemon` | Explicitly opt in to the `pi-bot.service` install (default behavior — included for symmetry). |
 | `--dry-run` | Print every action without executing — useful for previewing on a fresh CT |
-| `--uninstall` | Stop the systemd service, remove the unit, strip `PI_MATTERMOST_AUTO_CONNECT` from `/root/.bashrc`, unregister the package from pi's `settings.json`. Leaves the npm install + DB in place for fast reinstall via re-running. |
+| `--uninstall` | Stop both `pi-mattermost` and `pi-bot` services, remove the units, kill the `pi-bot` tmux session, strip `PI_MATTERMOST_AUTO_CONNECT` from `/root/.bashrc`, unregister the package from pi's `settings.json`. Leaves the npm install + DB in place for fast reinstall via re-running. |
+
+**The pi-bot daemon (`pi-bot.service`):**
+
+This is what makes pi "live" 24/7 inside Mattermost. Architecture:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  pi-bot.service  (systemd, Type=forking, RemainAfterExit)   │
+│                                                             │
+│     ExecStart:  tmux new-session -d -s pi-bot               │
+│                 "cd / && ollama launch pi"                  │
+│                                                             │
+│     ┌──────────────────────────────────────────────────┐    │
+│     │  tmux session 'pi-bot'                           │    │
+│     │                                                  │    │
+│     │  ┌────────────────────────────────────────┐      │    │
+│     │  │   ollama launch pi                     │      │    │
+│     │  │   - cwd: /                             │      │    │
+│     │  │   - env: PI_MATTERMOST_AUTO_CONNECT=1  │      │    │
+│     │  │   - default model: gemma4:31b-cloud    │      │    │
+│     │  │   - loads pi-mattermost extension      │      │    │
+│     │  │   - auto-registers session against     │      │    │
+│     │  │     bridge (channel = 'bot')           │      │    │
+│     │  └────────────────────────────────────────┘      │    │
+│     └──────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why tmux?** Pi is a TUI. It needs a pseudo-terminal (`pty`). Raw systemd `Type=simple` with `ExecStart=ollama launch pi` doesn't allocate one — pi either exits with "not a tty" or behaves erratically. `tmux new-session -d` allocates a pty AND immediately detaches, which satisfies systemd's `Type=forking` while leaving pi running inside.
+
+**Default model:** pi reads its default model from `~/.pi/agent/settings.json` (set to `gemma4:31b-cloud` by `setup-ollama-pi.sh`). To use a different model permanently, edit that file. To override per-session, you'd need to launch pi manually with the appropriate flag — but that defeats the daemon's purpose.
+
+**Attaching to the live session:**
+
+```bash
+PI_CTID=$(pct list | awk '$3=="ollama-pi-agent" {print $1}')
+pct exec $PI_CTID -- tmux attach -t pi-bot
+# Ctrl-b then d to detach (leaves pi running)
+# Or just close the terminal — pi stays alive
+```
+
+You can attach to see what pi is doing, type commands directly into pi's REPL, etc. Multiple `tmux attach` sessions can connect simultaneously — useful for sharing a session between humans.
+
+**Survives CT reboots:** `systemctl enable pi-bot.service` is wired during install. After a `pct reboot $PI_CTID`, the unit auto-starts (after `pi-mattermost.service` and `network-online.target`), pi registers with the bridge, and inbound `#bot` posts route immediately. No human intervention needed.
+
+**Restarting cleanly:**
+
+```bash
+pct exec $PI_CTID -- systemctl restart pi-bot
+# (this kills the old tmux session and starts a fresh one)
+```
+
+**Coexists with interactive sessions:** Running `pct enter $PI_CTID && ollama launch pi` opens a *second* pi session that registers separately. The daemon's session stays bound to `#bot`; your interactive one binds to whatever directory you launched from (e.g., `#root` if you launch from `/root`). You can have both running at once.
 
 **Channel routing — how pi picks where to chat:**
 
