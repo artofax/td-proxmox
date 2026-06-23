@@ -431,7 +431,7 @@ if (( ! DRY_RUN )); then
       NEW_CFG=$(echo "$CFG_RESP" | python3 -c "
 import sys, json
 c = json.load(sys.stdin)
-# Three settings to flip:
+# Six settings to flip:
 #  1. EnableUserAccessTokens — required to mint admin PAT for Homepage
 #     widget AND the bot's PAT.
 #  2. EnableBotAccountCreation — defaults to FALSE in Mattermost. Without
@@ -440,8 +440,27 @@ c = json.load(sys.stdin)
 #     blocked here, leaving the entire automation chain broken.)
 #  3. RequireEmailVerification — turn off so future signups don't loop
 #     on email-confirm.
-c.setdefault('ServiceSettings', {})['EnableUserAccessTokens'] = True
-c.setdefault('ServiceSettings', {})['EnableBotAccountCreation'] = True
+#  4. SiteURL — clear to empty. Mattermost defaults this to the IP the
+#     installer used (http://<ct-ip>:8065). With a non-empty value, MM's
+#     WebSocket handler does Host/Origin validation against it, so any
+#     access via a different name (MagicDNS like 'mattermost:8065',
+#     Tailscale FQDN, reverse proxy) gets ws disconnects with err 1006
+#     and real-time updates stop. Empty SiteURL = trust the request.
+#     Safe inside a tailnet because access is already auth-gated.
+#     (Caught by user 2026-06-23 — magicdns access lost typing+live
+#     updates; CORS errors from mattermost-ai plugin against the IP.)
+#  5. AllowCorsFrom — '*' so plugin AJAX calls (mattermost-ai etc.)
+#     don't trip CORS when accessed via a hostname different from
+#     SiteURL's recorded value.
+#  6. WebsocketURL — clear so client derives from the request URL.
+#     A hardcoded value here would override the page's WS URL and
+#     re-introduce the Host mismatch.
+ss = c.setdefault('ServiceSettings', {})
+ss['EnableUserAccessTokens']   = True
+ss['EnableBotAccountCreation'] = True
+ss['SiteURL']                  = ''
+ss['AllowCorsFrom']            = '*'
+ss['WebsocketURL']             = ''
 c.setdefault('EmailSettings', {})['RequireEmailVerification'] = False
 print(json.dumps(c))
 " 2>/dev/null || true)
