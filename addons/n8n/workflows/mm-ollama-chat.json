@@ -1,0 +1,151 @@
+{
+  "name": "AI chat (Mattermost outgoing → Ollama → reply)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mm-chat",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa",
+      "name": "Mattermost outgoing webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "td-mm-chat"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "filter-not-bot",
+              "leftValue": "={{$json.body.user_name || ''}}",
+              "rightValue": "pi-bot",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "aaaaaaaa-2222-2222-2222-aaaaaaaaaaaa",
+      "name": "Skip if bot wrote it",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "message",
+        "model": "gemma4:31b-cloud",
+        "messages": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a helpful assistant inside a small business's Mattermost. Keep replies short. Use Markdown. If you're not sure, say so."
+            },
+            {
+              "role": "user",
+              "content": "={{$json.body.text}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "aaaaaaaa-3333-3333-3333-aaaaaaaaaaaa",
+      "name": "Ollama",
+      "type": "n8n-nodes-base.ollama",
+      "typeVersion": 1,
+      "position": [800, 200],
+      "credentials": {
+        "ollamaApi": {
+          "name": "Ollama (shared)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response_type\": \"in_channel\",\n  \"text\": {{JSON.stringify($json.message?.content || $json.response || 'no answer')}}\n}",
+        "options": {}
+      },
+      "id": "aaaaaaaa-4444-4444-4444-aaaaaaaaaaaa",
+      "name": "Reply to Mattermost",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1080, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "noData",
+        "options": {}
+      },
+      "id": "aaaaaaaa-5555-5555-5555-aaaaaaaaaaaa",
+      "name": "Ignore (bot loop guard)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [800, 420]
+    }
+  ],
+  "connections": {
+    "Mattermost outgoing webhook": {
+      "main": [
+        [
+          {
+            "node": "Skip if bot wrote it",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip if bot wrote it": {
+      "main": [
+        [
+          {
+            "node": "Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore (bot loop guard)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama": {
+      "main": [
+        [
+          {
+            "node": "Reply to Mattermost",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": ["td-proxmox", "starter", "ai"],
+  "meta": {
+    "description": "Mattermost outgoing webhook → Ollama → reply. To wire this up in Mattermost: System Console → Integrations → Outgoing Webhooks → Add. Content type: application/json. Callback URL: http://n8n:5678/webhook/mm-chat (or your tailnet host). Trigger words optional. Channel: pick #ai-chat (or any). The 'Skip if bot wrote it' IF guards against bot-talking-to-itself loops by checking user_name != pi-bot."
+  }
+}

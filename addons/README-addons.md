@@ -22,6 +22,7 @@ For pi (or you, writing scripts that pi runs) registering tiles on the Homepage 
 | [`setup-mattermost.sh`](setup-mattermost.sh) | Stand up a Mattermost CT (self-hosted team chat) + full auto-config: admin user, enable PATs, create default team, register Homepage tile with widget | new CT | ~10 min |
 | [`setup-pi-mattermost-bridge.sh`](setup-pi-mattermost-bridge.sh) | Wire bidirectional chat between pi (on `ollama-pi-agent`) and Mattermost. User types in a channel, pi reads + responds. Wraps `@whonixnetworks/pi-mattermost` v1.5.0 + local patches + systemd unit | `ollama-pi-agent` | ~3 min |
 | [`setup-homepage-pi-widgets.sh`](setup-homepage-pi-widgets.sh) | Add two `customapi` tiles to Homepage: (1) live bridge channel-count (orphans / persisted / active), (2) most recent message in #bot. Exposes the bridge on the tailnet and installs a tiny Python proxy on the Mattermost CT to reshape MM's posts response | `ollama-pi-agent`, `mattermost`, `homepage` | ~2 min |
+| [`setup-n8n.sh`](setup-n8n.sh) | Stand up an n8n CT and **auto-wire credentials** for everything in the stack: Ollama (shared), Mattermost (pi-bot), Gitea (admin), OpenWebUI (OpenAI-compat). Imports three starter workflows (`hello-mattermost`, `mm-ollama-chat`, `gitea-daily-digest`) so you can start composing instead of plumbing | new CT | ~10 min |
 
 ---
 
@@ -860,6 +861,92 @@ Homepage's `customapi.mappings.field` does dot-notation extraction (e.g. `field:
 - Bot channel id: looked up fresh each run.
 - Homepage tiles: markered block-replace.
 - mm-latest-bot-post.service is `systemctl restart`'d on every run so changes to MM_TOKEN propagate.
+
+---
+
+## `setup-n8n.sh`
+
+Stands up [n8n](https://n8n.io) — a self-hosted workflow automation platform — on its own CT, then **pre-wires credentials** for every other service in your TD-Proxmox stack so you can start building actual workflows instead of copy-pasting tokens out of `/root/td-tokens.txt`.
+
+**Why bother:** n8n is the visual glue between Mattermost, Ollama, Gitea, OpenWebUI, and the outside world. By the time the script finishes, you can drag in a "Mattermost" node → it already knows your bot account. Drag in an "Ollama" node → it already points at `ollama-pi-agent`. The four-step "wire up the credentials" friction that kills most homelab n8n installs is done.
+
+**What you get:**
+
+- n8n on its own CT (community-scripts helper, defaults are fine)
+- Joined to your Tailscale tailnet with `/dev/net/tun` passthrough
+- Owner account created via REST (`POST /rest/owner/setup`) using the same `ADMIN_EMAIL` / `ADMIN_PASSWORD` you used everywhere else
+- An n8n API key minted and saved back as `N8N_API_KEY` in `/root/td-tokens.txt`
+- **Five pre-configured credentials** created via the API:
+  - `Ollama (shared)` → `http://ollama-pi-agent:11434`
+  - `Mattermost (pi-bot)` → reads `MATTERMOST_BOT_TOKEN` from `td-tokens.txt`
+  - `Gitea (admin)` → reads `GITEA_TOKEN` from `td-tokens.txt`
+  - `Gitea (admin) — Bearer` → same token, header-auth flavor for arbitrary REST calls
+  - `OpenWebUI (OpenAI-compat)` → reads `OPENWEBUI_TOKEN` from `td-tokens.txt`
+  - `TD shared webhook secret` → random `X-TD-Secret` header for trusted-caller webhook patterns
+- **Three starter workflows** imported as INACTIVE (review then activate):
+  - **`hello-mattermost`** — `POST /webhook/hello` → bot posts in `#town-square`. Smoke test that the Mattermost credential works.
+  - **`mm-ollama-chat`** — receives Mattermost's outgoing webhook → routes the message body through Ollama → posts the response back. Wire up Mattermost: *System Console → Integrations → Outgoing Webhooks → Add*, callback `http://n8n:5678/webhook/mm-chat`, pick a channel like `#ai-chat`. Includes a bot-loop guard (skips if `user_name == pi-bot`).
+  - **`gitea-daily-digest`** — daily 9am cron → lists Gitea repos updated in last 24h → fetches their commits → posts a digest in `#town-square`.
+- Homepage tile under `Automation → n8n`
+- All marker-strip + backup safety we use elsewhere — re-run any time
+
+**Usage:**
+
+```bash
+# Stack-wide install (default)
+./addons/setup-n8n.sh
+
+# Preview without changes
+./addons/setup-n8n.sh --dry-run
+
+# Skip the starter workflows (just install + wire credentials)
+./addons/setup-n8n.sh --skip-workflows
+
+# Just stand up the CT, no credentials, no workflows
+./addons/setup-n8n.sh --skip-credentials --skip-workflows
+
+# Don't pollute the Homepage dashboard
+./addons/setup-n8n.sh --skip-homepage-tile
+
+# Tear it down
+./addons/setup-n8n.sh --uninstall
+```
+
+**After it runs:**
+
+1. Open `http://n8n:5678` and sign in as `ADMIN_EMAIL`.
+2. Open *Workflows* — all three starters are there, marked inactive.
+3. Open each workflow once and confirm the credential selector in every node resolves to the pre-created credential (if n8n shows "select credential", pick the named one from the dropdown — n8n matches by name on first save).
+4. Toggle a workflow **Active** when you're ready.
+
+**Pre-flight tokens it needs in `/root/td-tokens.txt`:**
+
+| Required | Used for |
+|---|---|
+| `ADMIN_USER`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First-run owner setup |
+| `MATTERMOST_BOT_TOKEN`, `MATTERMOST_URL` | Mattermost credential (skipped if missing) |
+| `GITEA_TOKEN` | Gitea credential (skipped if missing) |
+| `OPENWEBUI_TOKEN` | OpenWebUI credential (skipped if missing) |
+| `TS_AUTHKEY`, `CT_PASSWORD` | CT creation + Tailscale join |
+
+Anything missing → that credential just isn't created, and the script tells you. Re-run after the missing service is set up and the credential gets added.
+
+**Why the workflows are imported as inactive:** webhooks become live URLs the moment they're activated. Reviewing them first is the responsible default — confirm the credential bindings, confirm the channel ids match your install, then flip the toggle.
+
+**Channel IDs in the starter workflows:** they reference `town-square` by slug. If your Mattermost has different channel names, edit the `channelId` on the Mattermost node — n8n accepts either a slug or a 26-char channel UUID.
+
+**Idempotency:**
+
+- CT creation: skipped if `hostname=n8n` already exists.
+- Owner setup: if owner already exists, the script logs in instead.
+- Credentials: each credential checked by name via `GET /credentials` before creating — re-runs skip existing ones, won't duplicate.
+- Workflows: importing a workflow with the same name creates a new one (n8n doesn't enforce name uniqueness on workflows). If you re-run and want to dedupe, delete the old copies in the n8n UI first.
+- API key: minted only on first run (idempotent because we check for the key in `td-tokens.txt` before calling `/rest/me/api-keys` again — n8n versions before 1.49 allowed only one key per user).
+- Homepage tile: marker-based block-strip + re-append.
+
+**Adding more credentials later:** anything else you wire (Slack, Telegram, AWS, OpenAI, etc.) you add manually in the n8n UI — only the in-stack services are auto-wired by this script. Keep the convention: name the credential after what it's for so the starter workflows' name-match resolution keeps working.
+
+**License note:** n8n is **Fair-Code** under their Sustainable Use License. Self-hosting for your own use (or your client's use, as a TD-Proxmox install) is fine. You **cannot** repackage n8n into your own SaaS product and resell it. The intake-website business model treats n8n as part of the customer's install, not a hosted product we sell access to — so this is well inside the license.
 
 ---
 
