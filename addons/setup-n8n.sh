@@ -46,6 +46,8 @@ UNINSTALL=0
 SKIP_WORKFLOWS=0
 SKIP_CREDENTIALS=0
 SKIP_HOMEPAGE_TILE=0
+CREDENTIALS_ONLY=0
+VERBOSE=0
 N8N_HOSTNAME="n8n"
 TOKENS_FILE="/root/td-tokens.txt"
 
@@ -60,6 +62,8 @@ while [[ $# -gt 0 ]]; do
     --skip-workflows)     SKIP_WORKFLOWS=1; shift ;;
     --skip-credentials)   SKIP_CREDENTIALS=1; shift ;;
     --skip-homepage-tile) SKIP_HOMEPAGE_TILE=1; shift ;;
+    --credentials-only)   CREDENTIALS_ONLY=1; shift ;;
+    --verbose|-v)         VERBOSE=1; shift ;;
     --hostname)           N8N_HOSTNAME="$2"; shift 2 ;;
     -h|--help)            sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -179,7 +183,10 @@ fi
 
 # ----- 1. Create n8n CT --------------------------------------------------
 CTID="$(find_ct_by_hostname "$N8N_HOSTNAME" 2>/dev/null || true)"
-if [[ -n "$CTID" ]]; then
+if (( CREDENTIALS_ONLY )); then
+  [[ -n "$CTID" ]] || die "--credentials-only requires existing $N8N_HOSTNAME CT."
+  log "Credentials-only mode — using existing CT $CTID, skipping create + Tailscale."
+elif [[ -n "$CTID" ]]; then
   log "n8n CT already exists (CT $CTID) — skipping creation."
 else
   log "Creating n8n CT via community-scripts helper..."
@@ -228,80 +235,168 @@ if (( ! DRY_RUN )); then
     || die "n8n didn't come up. Check: pct exec $CTID -- journalctl -u n8n -n 50"
 fi
 
+# ----- helpers for posting JSON SAFELY -----------------------------------
+# Pattern: write payload to a temp file on the CT, then `curl -d @file`.
+# This avoids quoting collisions when JSON contains " characters and we'd
+# otherwise be embedding it through `pct exec ... bash -lc "curl -d '...'"`.
+#
+# Use: post_json_file <local_payload_file> <method> <url> [extra_curl_args...]
+# Returns body on stdout, HTTP status on stderr. Always reads the body so
+# callers can grep it; we don't swallow errors.
+load_token_from_file_on_ct() {
+  local ctid="$1" local_file="$2" remote_file="$3"
+  pct push "$ctid" "$local_file" "$remote_file" --perms 0600
+}
+
+# Hit n8n's REST or API endpoint. Args:
+#   $1 = http method
+#   $2 = path (starting with '/' — caller picks /rest/... or /api/v1/...)
+#   $3 = body (optional, JSON string)
+# Extra args after $3 are appended to curl. Always prints body. Always
+# prints "HTTP <code>" to stderr.
+n8n_curl() {
+  local method="$1" path="$2" body="${3:-}"
+  shift 3 || true
+  local remote_body="/tmp/n8n-body.$$.json"
+  # Write the body locally then push (or empty out the remote file)
+  if [[ -n "$body" ]]; then
+    local tmp; tmp="$(mktemp)"
+    printf '%s' "$body" > "$tmp"
+    pct push "$CTID" "$tmp" "$remote_body" --perms 0600 >/dev/null
+    rm -f "$tmp"
+  else
+    pct exec "$CTID" -- bash -lc "rm -f $remote_body; touch $remote_body"
+  fi
+
+  local auth_header=""
+  if [[ "$path" == /api/v1/* && -n "${N8N_API_KEY:-}" ]]; then
+    auth_header="-H 'X-N8N-API-KEY: ${N8N_API_KEY}'"
+  fi
+  local data_arg=""
+  [[ -n "$body" ]] && data_arg="--data-binary @${remote_body}"
+
+  # Run curl on the CT. Print body to stdout, status to stderr.
+  # Note: the auth_header / data_arg are intentionally unquoted inside the
+  # double-quoted heredoc so the shell on the CT expands them as separate
+  # tokens. The header value itself is wrapped in single quotes so the API
+  # key is safe.
+  pct exec "$CTID" -- bash -lc "
+    code=\$(curl -sS -o /tmp/n8n-resp.body -w '%{http_code}' \
+      -b /tmp/n8n-cookies.txt -c /tmp/n8n-cookies.txt \
+      -X $method 'http://localhost:5678${path}' \
+      -H 'Content-Type: application/json' \
+      ${auth_header} \
+      ${data_arg})
+    cat /tmp/n8n-resp.body
+    echo HTTP \$code >&2
+    rm -f /tmp/n8n-resp.body
+  "
+}
+
 # ----- 3. Owner setup via REST -------------------------------------------
 log "Setting up n8n owner account..."
-SESSION_COOKIE=""
 
 if (( ! DRY_RUN )); then
   # POST /rest/owner/setup — accepts {email, firstName, lastName, password}
   # If already done, returns 400; we treat that as "already done" and move on.
-  OWNER_RESP="$(pct exec "$CTID" -- bash -lc "
-    curl -sS -c /tmp/n8n-cookies.txt -X POST 'http://localhost:5678/rest/owner/setup' \
-      -H 'Content-Type: application/json' \
-      -d '{
-        \"email\": \"$ADMIN_EMAIL\",
-        \"firstName\": \"$ADMIN_USER\",
-        \"lastName\": \"Admin\",
-        \"password\": \"$ADMIN_PASSWORD\"
-      }' 2>/dev/null || true
-  " 2>/dev/null)"
+  OWNER_BODY="$(python3 -c "
+import json, os
+print(json.dumps({
+  'email':     os.environ['ADMIN_EMAIL'],
+  'firstName': os.environ['ADMIN_USER'],
+  'lastName':  'Admin',
+  'password':  os.environ['ADMIN_PASSWORD'],
+}))" ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_USER="$ADMIN_USER" ADMIN_PASSWORD="$ADMIN_PASSWORD")"
 
-  if echo "$OWNER_RESP" | grep -q '"id"'; then
-    log "  ✓ Owner account created"
-  elif echo "$OWNER_RESP" | grep -qi 'already'; then
-    log "  Owner already exists — logging in"
-    pct exec "$CTID" -- bash -lc "
-      curl -sS -c /tmp/n8n-cookies.txt -X POST 'http://localhost:5678/rest/login' \
-        -H 'Content-Type: application/json' \
-        -d '{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}' >/dev/null 2>&1
-    "
-  else
-    warn "  Owner setup returned unexpected response:"
-    echo "$OWNER_RESP" | head -3 | sed 's/^/    /' >&2
-    warn "  Continuing anyway — manual sign-in may be required."
+  OWNER_RESP="$(n8n_curl POST /rest/owner/setup "$OWNER_BODY" 2> /tmp/n8n-owner.code)"
+  OWNER_CODE="$(awk '{print $2}' /tmp/n8n-owner.code 2>/dev/null)"
+
+  case "$OWNER_CODE" in
+    200|201)
+      log "  ✓ Owner account created (HTTP $OWNER_CODE)"
+      ;;
+    400|409)
+      log "  Owner already exists (HTTP $OWNER_CODE) — logging in"
+      LOGIN_BODY="$(python3 -c "
+import json, os
+print(json.dumps({'emailOrLdapLoginId': os.environ['ADMIN_EMAIL'], 'email': os.environ['ADMIN_EMAIL'], 'password': os.environ['ADMIN_PASSWORD']}))
+" ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_PASSWORD="$ADMIN_PASSWORD")"
+      LOGIN_RESP="$(n8n_curl POST /rest/login "$LOGIN_BODY" 2> /tmp/n8n-login.code)"
+      LOGIN_CODE="$(awk '{print $2}' /tmp/n8n-login.code 2>/dev/null)"
+      if [[ "$LOGIN_CODE" =~ ^2 ]]; then
+        log "  ✓ Logged in (HTTP $LOGIN_CODE)"
+      else
+        warn "  Login HTTP $LOGIN_CODE — body:"
+        echo "$LOGIN_RESP" | head -3 | sed 's/^/    /' >&2
+      fi
+      ;;
+    *)
+      warn "  Owner setup HTTP $OWNER_CODE — body:"
+      echo "$OWNER_RESP" | head -3 | sed 's/^/    /' >&2
+      warn "  Continuing anyway — manual sign-in may be required."
+      ;;
+  esac
+
+  # Mint an API key. n8n versions differ on the endpoint and response shape:
+  #   1.0–1.48: POST /rest/me/api-keys                  → {data:{apiKey:"..."}}
+  #   1.49+:    POST /rest/api-keys                     → {data:{rawApiKey:"...", apiKey:"..."}}
+  # We try both. We also re-use an existing key if one is already in tokens
+  # (n8n versions before 1.49 only allow one personal API key).
+  EXISTING_KEY="$(read_token N8N_API_KEY || true)"
+  if [[ -n "$EXISTING_KEY" ]]; then
+    log "  N8N_API_KEY already in $TOKENS_FILE — re-using it"
+    N8N_API_KEY="$EXISTING_KEY"
+    # Validate it before continuing
+    HEAD_CODE="$(pct exec "$CTID" -- bash -lc "curl -sS -o /dev/null -w '%{http_code}' -H 'X-N8N-API-KEY: $N8N_API_KEY' http://localhost:5678/api/v1/credentials")"
+    if [[ ! "$HEAD_CODE" =~ ^2 ]]; then
+      warn "  Existing key is invalid (HTTP $HEAD_CODE). Re-minting."
+      N8N_API_KEY=""
+    fi
   fi
 
-  # Mint an API key (n8n 1.0+ supports /rest/me/api-keys)
-  API_RESP="$(pct exec "$CTID" -- bash -lc "
-    curl -sS -b /tmp/n8n-cookies.txt -X POST 'http://localhost:5678/rest/me/api-keys' \
-      -H 'Content-Type: application/json' \
-      -d '{\"label\":\"td-proxmox automation\"}' 2>/dev/null || true
-  " 2>/dev/null)"
-
-  N8N_API_KEY="$(echo "$API_RESP" | python3 -c 'import sys,json
+  if [[ -z "$N8N_API_KEY" ]]; then
+    KEY_BODY='{"label":"td-proxmox automation"}'
+    for endpoint in /rest/api-keys /rest/me/api-keys; do
+      KEY_RESP="$(n8n_curl POST "$endpoint" "$KEY_BODY" 2> /tmp/n8n-key.code)"
+      KEY_CODE="$(awk '{print $2}' /tmp/n8n-key.code 2>/dev/null)"
+      log "  Trying $endpoint — HTTP $KEY_CODE"
+      if [[ "$KEY_CODE" =~ ^2 ]]; then
+        N8N_API_KEY="$(echo "$KEY_RESP" | python3 -c '
+import sys, json
 try:
     d = json.load(sys.stdin)
-    print(d.get("data", {}).get("apiKey", d.get("apiKey", "")))
+    data = d.get("data", d) if isinstance(d, dict) else d
+    print(data.get("rawApiKey") or data.get("apiKey") or "")
 except Exception:
-    pass' 2>/dev/null || true)"
+    pass' 2>/dev/null)"
+        if [[ -n "$N8N_API_KEY" ]]; then
+          upsert_token N8N_API_KEY "$N8N_API_KEY"
+          log "  ✓ N8N_API_KEY minted via $endpoint and saved to $TOKENS_FILE"
+          break
+        else
+          warn "  $endpoint returned 2xx but no key in response body:"
+          echo "$KEY_RESP" | head -3 | sed 's/^/    /' >&2
+        fi
+      fi
+    done
+  fi
 
-  if [[ -n "$N8N_API_KEY" ]]; then
-    upsert_token N8N_API_KEY "$N8N_API_KEY"
-    log "  ✓ N8N_API_KEY minted and saved to $TOKENS_FILE"
-  else
+  if [[ -z "$N8N_API_KEY" ]]; then
     warn "  Could not mint API key automatically. Generate one manually:"
     warn "    http://$N8N_HOSTNAME:5678 → Settings → API → Create"
-    warn "  Then: ./addons/setup-n8n.sh --skip-create-ct  to retry credential wiring."
+    warn "  Save it to $TOKENS_FILE as: N8N_API_KEY=<value>"
+    warn "  Then re-run: ./addons/setup-n8n.sh"
+    warn "  (CT exists, so this run will skip creation and just wire creds + workflows.)"
   fi
 fi
 
-# Helper for hitting n8n's API after this point
+# Helper for hitting n8n's API after this point (preserves /api/v1 vs /rest)
 n8n_api() {
   local method="$1" path="$2" body="${3:-}"
-  if [[ -n "$N8N_API_KEY" ]]; then
-    pct exec "$CTID" -- bash -lc "
-      curl -sS -X $method 'http://localhost:5678/api/v1$path' \
-        -H 'X-N8N-API-KEY: $N8N_API_KEY' \
-        -H 'Content-Type: application/json' \
-        ${body:+-d '$body'} 2>/dev/null
-    "
+  if [[ -n "${N8N_API_KEY:-}" ]]; then
+    n8n_curl "$method" "/api/v1$path" "$body"
   else
-    # Fallback: use session cookie
-    pct exec "$CTID" -- bash -lc "
-      curl -sS -b /tmp/n8n-cookies.txt -X $method 'http://localhost:5678/rest$path' \
-        -H 'Content-Type: application/json' \
-        ${body:+-d '$body'} 2>/dev/null
-    "
+    n8n_curl "$method" "/rest$path" "$body"
   fi
 }
 
@@ -314,17 +409,21 @@ else
   # Helper: only create if a credential with this name doesn't already exist
   cred_exists() {
     local name="$1"
-    n8n_api GET "/credentials" 2>/dev/null | python3 -c "
-import sys, json
+    local resp
+    resp="$(n8n_api GET "/credentials" "" 2>/dev/null)"
+    NAME="$name" python3 -c '
+import sys, json, os
+want = os.environ.get("NAME", "")
 try:
-    d = json.load(sys.stdin)
-    items = d.get('data', d) if isinstance(d, dict) else d
-    for c in items if isinstance(items, list) else []:
-        if c.get('name') == '$name':
-            print('exists'); sys.exit(0)
+    d = json.loads(sys.stdin.read() or "{}")
+    items = d.get("data", d) if isinstance(d, dict) else d
+    if isinstance(items, list):
+        for c in items:
+            if isinstance(c, dict) and c.get("name") == want:
+                print("exists"); sys.exit(0)
 except Exception:
     pass
-" 2>/dev/null | grep -q exists
+' <<< "$resp" | grep -q exists
   }
 
   create_credential() {
@@ -337,58 +436,71 @@ except Exception:
       log "  - $name already exists, skipping"
       return 0
     fi
+    # Build the payload as proper JSON via Python — env vars carry the raw
+    # values so quotes/escapes inside tokens don't matter.
     local payload
-    payload="$(python3 -c "
-import json
+    payload="$(NAME="$name" TYPE="$type" DATA="$data_json" python3 -c '
+import json, os
 print(json.dumps({
-  'name': '$name',
-  'type': '$type',
-  'data': $data_json
-}))" 2>/dev/null)"
-    local resp
-    resp="$(n8n_api POST "/credentials" "$payload" 2>/dev/null)"
-    if echo "$resp" | grep -q '"id"'; then
-      log "  ✓ $name"
+  "name": os.environ["NAME"],
+  "type": os.environ["TYPE"],
+  "data": json.loads(os.environ["DATA"]),
+}))')"
+    local resp code
+    resp="$(n8n_api POST "/credentials" "$payload" 2> /tmp/n8n-cred.code)"
+    code="$(awk "{print \$2}" /tmp/n8n-cred.code 2>/dev/null)"
+    if [[ "$code" =~ ^2 ]]; then
+      log "  ✓ $name (HTTP $code)"
     else
-      warn "  ✗ $name failed:"
+      warn "  ✗ $name HTTP $code — body:"
       echo "$resp" | head -2 | sed 's/^/      /' >&2
     fi
   }
 
   # 4a. Ollama (always create — even if CT is missing, URL is correct for when it's added later)
   create_credential "Ollama (shared)" "ollamaApi" \
-    "{'baseUrl': 'http://ollama-pi-agent:11434'}"
+    '{"baseUrl":"http://ollama-pi-agent:11434"}'
 
   # 4b. Mattermost — only if creds present
   if [[ -n "$MM_BOT_TOKEN" ]]; then
     create_credential "Mattermost (pi-bot)" "mattermostApi" \
-      "{'accessToken': '$MM_BOT_TOKEN', 'baseUrl': '$MM_URL'}"
+      "$(MM_BOT_TOKEN="$MM_BOT_TOKEN" MM_URL="$MM_URL" python3 -c '
+import json, os
+print(json.dumps({"accessToken": os.environ["MM_BOT_TOKEN"], "baseUrl": os.environ["MM_URL"]}))')"
   fi
 
   # 4c. Gitea — only if creds present
   if [[ -n "$GITEA_TOKEN" ]]; then
     create_credential "Gitea (admin)" "giteaApi" \
-      "{'server': 'http://gitea:3000', 'accessToken': '$GITEA_TOKEN'}"
+      "$(GITEA_TOKEN="$GITEA_TOKEN" python3 -c '
+import json, os
+print(json.dumps({"server": "http://gitea:3000", "accessToken": os.environ["GITEA_TOKEN"]}))')"
     # Plus a header-auth credential for arbitrary REST calls — n8n's native
     # Gitea node covers issues/repos but not every endpoint, so the digest
     # workflow uses HTTP Request + this header credential against /api/v1.
     create_credential "Gitea (admin) — Bearer" "httpHeaderAuth" \
-      "{'name': 'Authorization', 'value': 'token $GITEA_TOKEN'}"
+      "$(GITEA_TOKEN="$GITEA_TOKEN" python3 -c '
+import json, os
+print(json.dumps({"name": "Authorization", "value": "token " + os.environ["GITEA_TOKEN"]}))')"
   fi
 
   # 4d. OpenWebUI as OpenAI-compatible
   if [[ -n "$OPENWEBUI_TOKEN" ]]; then
     create_credential "OpenWebUI (OpenAI-compat)" "openAiApi" \
-      "{'apiKey': '$OPENWEBUI_TOKEN', 'url': 'http://openwebui:8080/api/v1'}"
+      "$(OPENWEBUI_TOKEN="$OPENWEBUI_TOKEN" python3 -c '
+import json, os
+print(json.dumps({"apiKey": os.environ["OPENWEBUI_TOKEN"], "url": "http://openwebui:8080/api/v1"}))')"
   fi
 
-  # 4e. The webhook signing secret n8n uses for the webhook trigger — we
-  # don't strictly need a credential for this, but a header-auth credential
-  # is useful for any "trusted webhook" patterns. Generate a random one.
+  # 4e. A random header-auth credential for any "trusted webhook" pattern
+  # callers can use to authenticate themselves to n8n webhooks.
   if (( ! DRY_RUN )); then
-    SHARED_SECRET="$(openssl rand -hex 16)"
+    EXISTING_SECRET="$(read_token N8N_WEBHOOK_SECRET || true)"
+    SHARED_SECRET="${EXISTING_SECRET:-$(openssl rand -hex 16)}"
     create_credential "TD shared webhook secret" "httpHeaderAuth" \
-      "{'name': 'X-TD-Secret', 'value': '$SHARED_SECRET'}"
+      "$(SHARED_SECRET="$SHARED_SECRET" python3 -c '
+import json, os
+print(json.dumps({"name": "X-TD-Secret", "value": os.environ["SHARED_SECRET"]}))')"
     upsert_token N8N_WEBHOOK_SECRET "$SHARED_SECRET"
   fi
 fi
@@ -402,37 +514,34 @@ else
   log "Importing starter workflows..."
 
   if (( ! DRY_RUN )); then
-    # Push the workflow JSONs into the CT
-    pct exec "$CTID" -- mkdir -p /tmp/n8n-import
     for wf in "$WORKFLOWS_DIR"/*.json; do
       [[ -f "$wf" ]] || continue
-      pct push "$CTID" "$wf" "/tmp/n8n-import/$(basename "$wf")" --perms 0644
-
       WF_NAME="$(basename "$wf" .json)"
-      log "  Importing: $WF_NAME"
 
-      # Strip top-level keys n8n's API doesn't accept on POST (id, etc.)
-      WF_BODY="$(pct exec "$CTID" -- bash -lc "python3 -c '
-import json, sys
-with open(\"/tmp/n8n-import/$(basename "$wf")\") as f:
+      # Read + clean the JSON locally (no shell-quoting hell)
+      WF_BODY="$(WF_PATH="$wf" python3 -c '
+import json, os
+with open(os.environ["WF_PATH"]) as f:
     w = json.load(f)
-for k in (\"id\", \"createdAt\", \"updatedAt\", \"versionId\", \"shared\"):
+for k in ("id", "createdAt", "updatedAt", "versionId", "shared", "meta", "tags"):
     w.pop(k, None)
-w[\"active\"] = False
-print(json.dumps(w))
-'")"
+w["active"] = False
+# n8n public API expects only these top-level keys on workflow POST:
+#   name, nodes, connections, settings, staticData (optional)
+allowed = {"name","nodes","connections","settings","staticData"}
+w = {k:v for k,v in w.items() if k in allowed}
+w.setdefault("settings", {"executionOrder": "v1"})
+print(json.dumps(w))')"
 
-      n8n_api POST "/workflows" "$WF_BODY" 2>&1 | python3 -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    if isinstance(d, dict) and ("id" in d or "data" in d):
-        print("    ✓ imported (inactive — activate via n8n UI after review)")
-    else:
-        print("    ✗", json.dumps(d)[:200])
-except Exception as e:
-    print("    ?", str(e)[:200])
-' || true
+      log "  Importing: $WF_NAME"
+      RESP="$(n8n_api POST "/workflows" "$WF_BODY" 2> /tmp/n8n-wf.code)"
+      CODE="$(awk '{print $2}' /tmp/n8n-wf.code 2>/dev/null)"
+      if [[ "$CODE" =~ ^2 ]]; then
+        log "    ✓ imported (inactive — activate via n8n UI after review)"
+      else
+        warn "    ✗ HTTP $CODE — body:"
+        echo "$RESP" | head -3 | sed 's/^/        /' >&2
+      fi
     done
   fi
 fi
