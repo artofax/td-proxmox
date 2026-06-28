@@ -126,9 +126,34 @@ ADMIN_USER="$(read_token ADMIN_USER || true)"
 ADMIN_EMAIL="$(read_token ADMIN_EMAIL || true)"
 ADMIN_PASSWORD="$(read_token ADMIN_PASSWORD || true)"
 
-if [[ -z "$ADMIN_USER" || -z "$ADMIN_EMAIL" || -z "$ADMIN_PASSWORD" ]]; then
-  die "Need ADMIN_USER, ADMIN_EMAIL, ADMIN_PASSWORD in $TOKENS_FILE.
-  Re-run automation/configure-apps.sh first so those land there."
+# n8n has its own owner-account requirements that differ from the rest of the
+# stack:
+#   - email must be REAL and reachable — n8n 2.x sends an activation code
+#     to verify it (use a tutanota / mailbox.org / gmail address, not
+#     admin@localhost)
+#   - password must contain at least 1 number (8+ chars, mixed)
+# If your stack-wide ADMIN_PASSWORD doesn't satisfy those (e.g. all letters,
+# or the email isn't real), set these overrides in /root/td-tokens.txt and
+# this script will use them for owner setup / login instead:
+#   N8N_OWNER_EMAIL=...
+#   N8N_OWNER_PASSWORD=...
+N8N_OWNER_EMAIL="$(read_token N8N_OWNER_EMAIL || true)"
+N8N_OWNER_PASSWORD="$(read_token N8N_OWNER_PASSWORD || true)"
+[[ -z "$N8N_OWNER_EMAIL"    ]] && N8N_OWNER_EMAIL="$ADMIN_EMAIL"
+[[ -z "$N8N_OWNER_PASSWORD" ]] && N8N_OWNER_PASSWORD="$ADMIN_PASSWORD"
+
+if [[ -z "$ADMIN_USER" || -z "$N8N_OWNER_EMAIL" || -z "$N8N_OWNER_PASSWORD" ]]; then
+  die "Need ADMIN_USER + (N8N_OWNER_EMAIL or ADMIN_EMAIL) + (N8N_OWNER_PASSWORD or ADMIN_PASSWORD) in $TOKENS_FILE.
+  Re-run automation/configure-apps.sh first so the ADMIN_* land there."
+fi
+
+# Sanity-check the password n8n will receive: at least 1 digit, length >= 8
+if ! [[ "$N8N_OWNER_PASSWORD" =~ [0-9] ]]; then
+  warn "  n8n requires at least 1 number in the password — yours has none."
+  warn "  Owner setup may fail. Set N8N_OWNER_PASSWORD in $TOKENS_FILE to override."
+fi
+if (( ${#N8N_OWNER_PASSWORD} < 8 )); then
+  warn "  n8n requires password length >= 8 — yours is ${#N8N_OWNER_PASSWORD}."
 fi
 
 TS_AUTHKEY="$(read_token TS_AUTHKEY || true)"
@@ -305,13 +330,13 @@ if (( ! DRY_RUN )); then
   # If already done, returns 400; we treat that as "already done" and move on.
   # Env vars MUST be prefixed before python3 — they're env to the command,
   # not argv. (Bash's KEY=VAL prefix only applies as env when at the start.)
-  OWNER_BODY="$(ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_USER="$ADMIN_USER" ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 -c '
+  OWNER_BODY="$(N8N_OWNER_EMAIL="$N8N_OWNER_EMAIL" ADMIN_USER="$ADMIN_USER" N8N_OWNER_PASSWORD="$N8N_OWNER_PASSWORD" python3 -c '
 import json, os
 print(json.dumps({
-  "email":     os.environ["ADMIN_EMAIL"],
+  "email":     os.environ["N8N_OWNER_EMAIL"],
   "firstName": os.environ["ADMIN_USER"],
   "lastName":  "Admin",
-  "password":  os.environ["ADMIN_PASSWORD"],
+  "password":  os.environ["N8N_OWNER_PASSWORD"],
 }))')"
 
   OWNER_RESP="$(n8n_curl POST /rest/owner/setup "$OWNER_BODY" 2> /tmp/n8n-owner.code)"
@@ -323,12 +348,12 @@ print(json.dumps({
       ;;
     400|409)
       log "  Owner already exists (HTTP $OWNER_CODE) — logging in"
-      LOGIN_BODY="$(ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 -c '
+      LOGIN_BODY="$(N8N_OWNER_EMAIL="$N8N_OWNER_EMAIL" N8N_OWNER_PASSWORD="$N8N_OWNER_PASSWORD" python3 -c '
 import json, os
 print(json.dumps({
-  "emailOrLdapLoginId": os.environ["ADMIN_EMAIL"],
-  "email":              os.environ["ADMIN_EMAIL"],
-  "password":           os.environ["ADMIN_PASSWORD"],
+  "emailOrLdapLoginId": os.environ["N8N_OWNER_EMAIL"],
+  "email":              os.environ["N8N_OWNER_EMAIL"],
+  "password":           os.environ["N8N_OWNER_PASSWORD"],
 }))')"
       # n8n 1.x uses /rest/login; n8n 2.x may use /rest/auth/login. Try both.
       LOGGED_IN=0
