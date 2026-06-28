@@ -55,6 +55,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKFLOWS_DIR="$SCRIPT_DIR/n8n/workflows"
 HELPER_URL="https://github.com/community-scripts/ProxmoxVE/raw/main/ct/n8n.sh"
 
+# Pre-declare these so set -u doesn't trip when login fails before they're set
+N8N_API_KEY=""
+CTID=""
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)            DRY_RUN=1; shift ;;
@@ -395,11 +399,26 @@ except Exception:
   fi
 
   if [[ -z "$N8N_API_KEY" ]]; then
-    warn "  Could not mint API key automatically. Generate one manually:"
-    warn "    http://$N8N_HOSTNAME:5678 → Settings → API → Create"
-    warn "  Save it to $TOKENS_FILE as: N8N_API_KEY=<value>"
-    warn "  Then re-run: ./addons/setup-n8n.sh"
-    warn "  (CT exists, so this run will skip creation and just wire creds + workflows.)"
+    log "================================================================"
+    warn "  No API key available — auto-mint failed and none in tokens file."
+    warn ""
+    warn "  This usually means login failed (HTTP 401), which means either:"
+    warn "    1. The password in $TOKENS_FILE doesn't match what the owner"
+    warn "       account in n8n was actually created with, OR"
+    warn "    2. n8n 2.x's login API expects a shape we're not sending."
+    warn ""
+    warn "  Manual recovery (60 seconds):"
+    warn "    1. Open http://$N8N_HOSTNAME:5678"
+    warn "    2. Log in. If you can't log in: pct exec $CTID -- n8n"
+    warn "       user-management:reset  (deletes owner, lets you re-signup)"
+    warn "    3. Settings → n8n API → 'Create an API key' → copy value"
+    warn "    4. echo 'N8N_API_KEY=<paste>' >> $TOKENS_FILE"
+    warn "    5. ./addons/setup-n8n.sh --credentials-only"
+    warn ""
+    warn "  The next run will validate the key and proceed straight to"
+    warn "  credentials + workflows, no login needed."
+    log "================================================================"
+    exit 1
   fi
 fi
 
