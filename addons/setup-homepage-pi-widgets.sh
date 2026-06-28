@@ -151,14 +151,21 @@ if (( UNINSTALL )); then
   ' 2>/dev/null | tail -n1)"
 
   if [[ -n "$services_file" ]] && (( ! DRY_RUN )); then
-    # Cover legacy markers (pre-consolidation) AND the current combined marker.
-    for marker in "# TD-Addon: pi-bridge" "# TD-Addon: mm-latest-post" "# TD-Addon: pi-widgets"; do
-      pct exec "$HP_CTID" -- bash -lc "awk -v m='$marker' '
-        \$0 ~ m { in_block=1; next }
-        in_block && \$0 ~ /^# TD-Addon:/ { in_block=0 }
-        !in_block { print }
-      ' '$services_file' > /tmp/services.yaml.new && mv /tmp/services.yaml.new '$services_file'"
-    done
+    # Backup before touching — same precaution as install path.
+    pct exec "$HP_CTID" -- cp "$services_file" "${services_file}.bak.$(date +%s)"
+    # Single-pass strip — see write_combined_tile() for rationale.
+    pct exec "$HP_CTID" -- bash -lc "awk '
+      /^# TD-Addon:/ {
+        if (\$0 ~ /pi-bridge|mm-latest-post|pi-widgets/) {
+          in_block = 1
+        } else {
+          in_block = 0
+          print
+        }
+        next
+      }
+      !in_block { print }
+    ' '$services_file' > /tmp/services.yaml.new && mv /tmp/services.yaml.new '$services_file'"
     pct exec "$HP_CTID" -- bash -lc 'systemctl restart homepage 2>/dev/null || systemctl restart gethomepage 2>/dev/null || true'
   fi
 
@@ -418,18 +425,34 @@ write_combined_tile() {
     return 0
   }
 
-  # Strip legacy markered blocks (pre-v2 of this script) AND current marker.
-  # This keeps the file clean across upgrades from any previous version.
-  for m in "# TD-Addon: pi-bridge" "# TD-Addon: mm-latest-post" "$marker"; do
-    if pct exec "$HP_CTID" -- grep -qF "$m" "$services_file" 2>/dev/null; then
-      log "  Removing existing $m block..."
-      pct exec "$HP_CTID" -- bash -lc "awk -v m='$m' '
-        \$0 ~ m { in_block=1; next }
-        in_block && \$0 ~ /^# TD-Addon:/ { in_block=0 }
-        !in_block { print }
-      ' '$services_file' > /tmp/services.yaml.new && mv /tmp/services.yaml.new '$services_file'"
-    fi
-  done
+  # Always make a timestamped backup BEFORE touching the file. Lets you
+  # 'cp services.yaml.bak.<ts> services.yaml' if anything goes sideways.
+  pct exec "$HP_CTID" -- cp "$services_file" "${services_file}.bak.$(date +%s)"
+
+  # Single-pass strip of ALL our markers at once. Every '# TD-Addon:' line
+  # resets in_block based on whether it matches one of our markers — so we
+  # can never accidentally strip past the end of our own block. Other
+  # TD-Addon markers (like 'mattermost') terminate our block AND get
+  # printed, which is what we want.
+  #
+  # The previous per-marker loop had a fatal compounding bug: if any
+  # iteration's awk failed mid-way or the file lost a terminating marker,
+  # subsequent iterations could strip past content they shouldn't have
+  # touched. (Cost a user their entire services.yaml on 2026-06-23 — only
+  # the pi-widgets block survived.) Hence the always-on backup above.
+  log "  Removing any existing pi-widgets / pi-bridge / mm-latest-post blocks..."
+  pct exec "$HP_CTID" -- bash -lc "awk '
+    /^# TD-Addon:/ {
+      if (\$0 ~ /pi-bridge|mm-latest-post|pi-widgets/) {
+        in_block = 1
+      } else {
+        in_block = 0
+        print
+      }
+      next
+    }
+    !in_block { print }
+  ' '$services_file' > /tmp/services.yaml.new && mv /tmp/services.yaml.new '$services_file'"
 
   log "  Appending $marker block..."
   printf '\n%s\n%s\n' "$marker" "$block" | pct exec "$HP_CTID" -- tee -a "$services_file" >/dev/null

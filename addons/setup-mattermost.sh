@@ -191,6 +191,22 @@ if [[ -z "$ADMIN_PASSWORD" ]]; then
   fi
 fi
 
+# SMTP credentials (optional). If present in td-tokens.txt, the config PUT
+# below wires Mattermost's EmailSettings to relay through the provider so
+# @mentions, password resets, admin invitations actually arrive. If absent,
+# we leave MM's defaults in place (its SMTP fields stay empty, no mail sent).
+SMTP_HOST="$(read_from_tokens SMTP_HOST 2>/dev/null || true)"
+SMTP_PORT="$(read_from_tokens SMTP_PORT 2>/dev/null || echo 587)"
+SMTP_USERNAME="$(read_from_tokens SMTP_USERNAME 2>/dev/null || true)"
+SMTP_PASSWORD="$(read_from_tokens SMTP_PASSWORD 2>/dev/null || true)"
+SMTP_FROM="$(read_from_tokens SMTP_FROM 2>/dev/null || true)"
+SMTP_FROM_NAME="$(read_from_tokens SMTP_FROM_NAME 2>/dev/null || echo 'Mattermost')"
+if [[ -n "$SMTP_HOST" ]]; then
+  log "Will wire Mattermost EmailSettings to $SMTP_HOST:$SMTP_PORT (FROM: $SMTP_FROM)"
+else
+  log "No SMTP_HOST in $TOKENS_FILE — Mattermost email will be disabled. Add SMTP_* and re-run to enable."
+fi
+
 # TS_AUTHKEY and CT_PASSWORD are ONLY needed when creating a fresh CT.
 # When EXISTING_CT=1 we're re-running just the API auto-config phase against
 # an already-up CT — skip these prompts entirely. Saves a re-prompt every
@@ -486,7 +502,39 @@ ss['EnablePostIconOverride']     = True
 #    the SSRF whitelist is the real fix, this is harmless. If this flag is
 #    the real fix (a bug somewhere in MM's request pipeline), we're covered.
 ss['EnableDynamicClientRegistration'] = True
-c.setdefault('EmailSettings', {})['RequireEmailVerification'] = False
+
+# 10. EmailSettings — wire SMTP so MM sends mention emails, password resets,
+#     admin invitations, etc. Reads SMTP_* from environment (passed in by
+#     bash heredoc below). Skip if SMTP_HOST is empty — leave MM's defaults
+#     in place so it doesn't try to send mail and queue/fail silently.
+es = c.setdefault('EmailSettings', {})
+es['RequireEmailVerification'] = False  # never gate access on email working
+smtp_host = '''$SMTP_HOST'''
+if smtp_host:
+    es['EnableSignUpWithEmail']       = True
+    es['EnableSignInWithEmail']       = True
+    es['EnableSignInWithUsername']    = True
+    es['SendEmailNotifications']      = True
+    es['EnableSMTPAuth']              = True
+    es['SMTPServer']                  = smtp_host
+    es['SMTPPort']                    = '''${SMTP_PORT:-587}'''
+    es['SMTPUsername']                = '''$SMTP_USERNAME'''
+    es['SMTPPassword']                = '''$SMTP_PASSWORD'''
+    # 587 = STARTTLS, 465 = TLS, 25 = none. Pick TLS variant based on port.
+    smtp_port_str = '''${SMTP_PORT:-587}'''
+    if smtp_port_str == '465':
+        es['ConnectionSecurity'] = 'TLS'
+    elif smtp_port_str == '25':
+        es['ConnectionSecurity'] = ''
+    else:
+        es['ConnectionSecurity'] = 'STARTTLS'
+    es['FeedbackEmail']               = '''$SMTP_FROM'''
+    es['FeedbackName']                = '''${SMTP_FROM_NAME:-Mattermost}'''
+    es['FeedbackOrganization']        = '''${SMTP_FROM_NAME:-Mattermost}'''
+    es['ReplyToAddress']              = '''$SMTP_FROM'''
+    es['SkipServerCertificateVerification'] = False
+    es['SendPushNotifications']       = False  # only set this true if you've configured a push service
+
 print(json.dumps(c))
 " 2>/dev/null || true)
       if [[ -n "$NEW_CFG" ]]; then

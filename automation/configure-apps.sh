@@ -190,10 +190,61 @@ resolve_openrouter_key() {
     || die "That doesn't look like an OpenRouter key (expected sk-or-...)."
 }
 
+resolve_smtp_creds() {
+  # SMTP_HOST is the gating variable — if it's not set, we treat email as
+  # "configure later" and skip the rest. If it IS set, we expect the other
+  # SMTP_* vars to also be there (and warn if any are missing).
+  SMTP_HOST="$(_read_token_field SMTP_HOST 2>/dev/null || true)"
+  SMTP_PORT="$(_read_token_field SMTP_PORT 2>/dev/null || echo 587)"
+  SMTP_USERNAME="$(_read_token_field SMTP_USERNAME 2>/dev/null || true)"
+  SMTP_PASSWORD="$(_read_token_field SMTP_PASSWORD 2>/dev/null || true)"
+  SMTP_FROM="$(_read_token_field SMTP_FROM 2>/dev/null || true)"
+  SMTP_FROM_NAME="$(_read_token_field SMTP_FROM_NAME 2>/dev/null || echo 'TD-Proxmox')"
+  ADMIN_NOTIFY_EMAIL="$(_read_token_field ADMIN_NOTIFY_EMAIL 2>/dev/null || echo "$ADMIN_EMAIL")"
+
+  # If SMTP_HOST is already set, return — we'll wire email
+  if [[ -n "$SMTP_HOST" ]]; then
+    log "Found SMTP_HOST='$SMTP_HOST' in $TOKENS_FILE — will wire email layer."
+    return
+  fi
+
+  # No SMTP — offer to set it up interactively, or skip
+  if (( DRY_RUN )); then
+    log "Dry-run: skipping SMTP prompt (would prompt for SMTP_HOST/USERNAME/PASSWORD/FROM)."
+    return
+  fi
+
+  printf "\n\033[1;36m[configure-apps]\033[0m Email/SMTP: do you have an SMTP provider (Postmark/Mailgun/SES) ready? [y/N]: " >&2
+  local yn
+  IFS= read -r yn
+  case "$yn" in
+    y|Y|yes|YES)
+      printf "  SMTP host (e.g. smtp.postmarkapp.com): " >&2
+      IFS= read -r SMTP_HOST
+      printf "  SMTP port [587]: " >&2
+      IFS= read -r _p; SMTP_PORT="${_p:-587}"
+      printf "  SMTP username (Postmark Server Token): " >&2
+      IFS= read -r SMTP_USERNAME
+      printf "  SMTP password (Postmark uses the same Server Token; hidden): " >&2
+      IFS= read -rs SMTP_PASSWORD; echo >&2
+      printf "  SMTP From: address (must be verified at provider, e.g. alerts@yourdomain.com): " >&2
+      IFS= read -r SMTP_FROM
+      printf "  SMTP From: friendly name [TD-Proxmox]: " >&2
+      IFS= read -r _n; SMTP_FROM_NAME="${_n:-TD-Proxmox}"
+      printf "  Where should PVE alerts forward to? [$ADMIN_EMAIL]: " >&2
+      IFS= read -r _e; ADMIN_NOTIFY_EMAIL="${_e:-$ADMIN_EMAIL}"
+      ;;
+    *)
+      log "Skipping SMTP setup. You can add the email block to $TOKENS_FILE later and re-run with --only email."
+      ;;
+  esac
+}
+
 resolve_admin_user
 resolve_admin_email
 resolve_admin_password
 resolve_openrouter_key
+resolve_smtp_creds
 
 selected() {
   local key="$1"
@@ -1310,8 +1361,9 @@ write_summary() {
       ADMIN_USER|ADMIN_EMAIL|ADMIN_PASSWORD| \
       GITEA_URL|GITEA_TOKEN| \
       OPENWEBUI_URL|HOMEPAGE_URL| \
-      OPENROUTER_API_KEY)
-        ;;  # handled above
+      OPENROUTER_API_KEY| \
+      SMTP_HOST|SMTP_PORT|SMTP_USERNAME|SMTP_PASSWORD|SMTP_FROM|SMTP_FROM_NAME|ADMIN_NOTIFY_EMAIL)
+        ;;  # handled above (email block written below)
       *)
         extra_lines+="$k=${existing[$k]}"$'\n'
         ;;
@@ -1337,6 +1389,21 @@ OPENROUTER_API_KEY=$m_openrouter
 EOF
 )"
 
+  # Email block — only emit if SMTP_HOST is set (configure_email was wired)
+  if [[ -n "${SMTP_HOST:-}" ]]; then
+    body+=$'\n'"$(cat <<EOF
+# Email — wires PVE postfix + can be referenced by any addon that sends mail
+SMTP_HOST=$SMTP_HOST
+SMTP_PORT=${SMTP_PORT:-587}
+SMTP_USERNAME=$SMTP_USERNAME
+SMTP_PASSWORD=$SMTP_PASSWORD
+SMTP_FROM=$SMTP_FROM
+SMTP_FROM_NAME=${SMTP_FROM_NAME:-TD-Proxmox}
+ADMIN_NOTIFY_EMAIL=${ADMIN_NOTIFY_EMAIL:-$m_admin_email}
+EOF
+)"
+  fi
+
   # Tack on preserved lines (MATTERMOST_*, etc.) if any
   if [[ -n "$extra_lines" ]]; then
     body+=$'\n\n'"# Addon-managed values (preserved across runs):"$'\n'"$extra_lines"
@@ -1352,10 +1419,81 @@ TOKENS"
   echo "----------------------------------------"
 }
 
+# ----- email (PVE host postfix relay) ---------------------------------------
+# Runs setup-pve-email.sh from addons/ to wire the PVE host's postfix through
+# the SMTP credentials in td-tokens.txt. After this, vzdump completion
+# notices, root cron output, PVE subscription nag, and anything calling
+# `mail` / `sendmail` routes through your provider (Postmark by default) and
+# lands in ADMIN_NOTIFY_EMAIL.
+configure_email() {
+  if [[ -z "$SMTP_HOST" ]]; then
+    log "configure_email: skipped — no SMTP_HOST in $TOKENS_FILE."
+    log "  Add the email block to $TOKENS_FILE and re-run with --only email."
+    return 0
+  fi
+
+  log "Configuring PVE host email relay (via Postmark/your provider)..."
+
+  # The SMTP_* values are already in td-tokens.txt (resolve_smtp_creds either
+  # found them or just wrote them). Now persist any newly-prompted values
+  # before invoking the addon.
+  local need_persist=0
+  for k in SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM SMTP_FROM_NAME ADMIN_NOTIFY_EMAIL; do
+    local v="${!k:-}"
+    [[ -z "$v" ]] && continue
+    if ! grep -q "^$k=" "$TOKENS_FILE" 2>/dev/null; then
+      need_persist=1
+    fi
+  done
+  if (( need_persist )); then
+    log "  Persisting SMTP_* values to $TOKENS_FILE..."
+    if (( ! DRY_RUN )); then
+      umask 077
+      {
+        for k in SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM SMTP_FROM_NAME ADMIN_NOTIFY_EMAIL; do
+          local v="${!k:-}"
+          [[ -z "$v" ]] && continue
+          if grep -q "^$k=" "$TOKENS_FILE"; then
+            sed -i "s|^$k=.*|$k=$v|" "$TOKENS_FILE"
+          else
+            echo "$k=$v" >> "$TOKENS_FILE"
+          fi
+        done
+      } 2>/dev/null
+    fi
+  fi
+
+  # Find setup-pve-email.sh — repo-relative first, fall back to /root/td-proxmox
+  local SCRIPT_DIR
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local EMAIL_ADDON="$SCRIPT_DIR/../addons/setup-pve-email.sh"
+  if [[ ! -f "$EMAIL_ADDON" ]]; then
+    EMAIL_ADDON="/root/td-proxmox/repo/addons/setup-pve-email.sh"
+  fi
+  if [[ ! -f "$EMAIL_ADDON" ]]; then
+    # Last resort: fetch from Gitea raw URL
+    EMAIL_ADDON="/tmp/setup-pve-email.sh"
+    log "  setup-pve-email.sh not found locally — fetching from Gitea..."
+    curl -fsSL -o "$EMAIL_ADDON" \
+      "http://10.27.0.190:3000/admin/td-proxmox/raw/branch/main/addons/setup-pve-email.sh" \
+      || die "Failed to fetch setup-pve-email.sh. Add the file at addons/setup-pve-email.sh."
+    chmod +x "$EMAIL_ADDON"
+  fi
+
+  # Run it. The addon reads from td-tokens.txt directly, no env passthrough needed.
+  if (( DRY_RUN )); then
+    log "  [dry-run] would run: $EMAIL_ADDON --tokens $TOKENS_FILE --dry-run"
+    bash "$EMAIL_ADDON" --tokens "$TOKENS_FILE" --dry-run 2>&1 | sed 's/^/    /' | head -20
+  else
+    bash "$EMAIL_ADDON" --tokens "$TOKENS_FILE" 2>&1 | sed 's/^/  /'
+  fi
+}
+
 # ----- driver ----------------------------------------------------------------
 main() {
-  log "==> Configure apps: Gitea + OpenWebUI + pi (ollama-pi-agent) + Homepage + filebrowser"
+  log "==> Configure apps: Gitea + OpenWebUI + pi (ollama-pi-agent) + Homepage + filebrowser + email"
   resolve_ctids
+  selected email       && configure_email
   selected gitea       && configure_gitea
   # configure_openwebui only runs if (a) selected and (b) the CT actually
   # exists. Bootstrap-pve.sh's --skip-openwebui makes the CT optional, so
