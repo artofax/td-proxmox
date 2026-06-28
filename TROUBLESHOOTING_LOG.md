@@ -73,9 +73,147 @@ n8n's Webhook node exposes both:
 Easy to copy the wrong one from the UI. Symptom: external system reports
 "delivered" but no n8n execution exists.
 
+### SMTP / postfix relay
+Most "email not arriving" issues fall into one of four patterns:
+
+1. **Sender not verified at the provider.** Postmark / Mailgun / SES all
+   require the `From:` address (or its domain) to be pre-verified before
+   accepting outbound mail. Symptom: `mailq` shows the message stuck
+   with `Sender address rejected` / `SenderSignatureNotConfirmed`.
+2. **Wrong port × wrong TLS mode.** 587 = STARTTLS, 465 = TLS, 25 = none.
+   Mismatched values usually surface as a TLS handshake timeout.
+3. **Generic map missing.** Without `/etc/postfix/generic`, `From:`
+   header stays as `root@<hostname>.localdomain`, which fails SPF/DKIM
+   and gets silently dropped.
+4. **PVE `mail-from` empty.** PVE alerts use `/etc/pve/datacenter.cfg`'s
+   `mail-from` for the alert sender. If empty, alerts fall back to the
+   local user's address, which usually isn't verified at the provider.
+
+`setup-pve-email.sh` handles all four if the tokens file has SMTP_* +
+ADMIN_NOTIFY_EMAIL set. `--test-only` lets you verify without re-config.
+
 ---
 
 ## Entries
+
+## 2026-06-28 19:30 CT — Email layer added to foundations + TD-Proxmox + studio-stack
+
+**Symptom (preventative, not reactive):** PVE alerts (vzdump completion,
+subscription nag, root mail) silently go into the local Postfix queue
+and never reach a real inbox. Mattermost @mentions never email offline
+users. Cal.com booking confirmations sit in queue.
+
+**Root cause:** Default PVE postfix tries to deliver mail directly from
+the home IP, which gets blocked by every modern receiver. There's no
+SMTP relay configured out of the box, and no service in the stack has
+SMTP credentials wired.
+
+**Fix:** Centralize SMTP credentials in `<stack>-tokens.txt` as
+`SMTP_HOST/PORT/USERNAME/PASSWORD/FROM/FROM_NAME` + `ADMIN_NOTIFY_EMAIL`.
+Run `setup-pve-email.sh` to configure host postfix relay. Each app's
+config picks up the same vars by name.
+
+**Files / Commit:**
+- `proxmox-stack-foundations/templates/addons/setup-pve-email.sh` (commit `1840514`)
+- `proxmox-stack-foundations/foundations.md` §5 Email layer (same)
+- `td-proxmox/addons/setup-pve-email.sh` + `setup-email-relay.sh` (commit `f6c3b2d`)
+- `td-proxmox/automation/configure-apps.sh` — `resolve_smtp_creds()` + `configure_email()` (same)
+- `td-proxmox/addons/setup-mattermost.sh` — `EmailSettings` in config PUT (same)
+- `studio-stack/automation/bootstrap-pve.sh` — SMTP_* prompts (commit `28b1f89`)
+
+**Related:** SMTP / postfix relay architectural pattern (top of this file).
+
+---
+
+## 2026-06-28 17:00 CT — Postmark rejects "Sender signature not confirmed"
+
+**Symptom (anticipated):** First test email from `setup-pve-email.sh`
+fails. Postmark API returns `SenderSignatureNotConfirmed`. Either the
+`--test-only` run errors out or the message sits in `mailq` with the
+rejection.
+
+**Root cause:** Postmark requires sender domain or address verification
+BEFORE allowing outbound. You can't just claim `From: alerts@yourdomain.com`
+— you have to verify it in the Postmark dashboard first.
+
+**Two verification options:**
+
+1. **Sender Signature** (fastest, per-address) — Postmark → Sender
+   Signatures → Add → enter `alerts@soboldata.com` → click the link in
+   the confirmation email they send you. ~2 min, works immediately.
+2. **Domain verification** (better, covers all addresses on the domain)
+   — Postmark → Sender Signatures → DKIM → add the suggested DKIM TXT
+   record to your domain's DNS. Once propagated (~5 min on Cloudflare),
+   ALL `@soboldata.com` senders work without per-address signup.
+
+**Fix:** Don't run the email addon until at least one sender is verified
+in Postmark. Then `--test-only` succeeds.
+
+**Related:** SMTP / postfix relay pattern. The default-deny is on the
+provider's side, not the service's.
+
+---
+
+## 2026-06-28 16:30 CT — MM SMTP works in test but @mention emails silently drop
+
+**Symptom (anticipated):** Mattermost `setup-mattermost.sh` runs cleanly
+with SMTP_* set. Test email from System Console succeeds. But @mention
+notifications to offline users don't arrive.
+
+**Three likely causes, in order:**
+
+1. **`SendEmailNotifications = false`.** MM defaults this to true on
+   fresh installs but flips to false if you ever set
+   `EmailSettings.EnableEmailNotifications` to false elsewhere.
+2. **`FeedbackEmail` not verified at Postmark.** MM uses
+   `FeedbackEmail` (not the SMTP `From:`) as the actual sender. Even
+   if SMTP_FROM is verified, FeedbackEmail must match — and if it's
+   empty MM falls back to `mattermost@<hostname>`, which Postmark
+   rejects.
+3. **User-level notification preferences.** Each MM user has individual
+   email-notification settings. If the recipient has them disabled, no
+   amount of SMTP wiring delivers.
+
+**Fix:** `setup-mattermost.sh`'s config PUT (commit `f6c3b2d`) now sets:
+- `SendEmailNotifications = true`
+- `FeedbackEmail = $SMTP_FROM`
+- `FeedbackName = $SMTP_FROM_NAME`
+
+For cause #3, the recipient flips Account Settings → Notifications →
+Email → Always send email notifications.
+
+---
+
+## 2026-06-28 16:00 CT — vzdump completion email never arrives
+
+**Symptom:** vzdump runs nightly per `/etc/pve/jobs.cfg`. Log shows
+success. But no email lands in `ADMIN_NOTIFY_EMAIL`.
+
+**Three causes to check in order:**
+
+1. **Postfix queue stuck.** Run `mailq` on the PVE host. If messages
+   are queued with errors, the SMTP relay isn't configured (run
+   `setup-pve-email.sh`) OR the auth is wrong (check
+   `/etc/postfix/sasl_passwd`, re-run `postmap` after edit).
+
+2. **PVE's `mail-from` empty.** Check `/etc/pve/datacenter.cfg`:
+   ```bash
+   grep mail-from /etc/pve/datacenter.cfg
+   ```
+   If empty, the alert is sent with no `From:` header, which the relay
+   rejects. `setup-pve-email.sh` writes `mail-from: $SMTP_FROM` to fix.
+
+3. **vzdump's per-job notification setting.** `/etc/pve/jobs.cfg`
+   entries can override notification. Check the `mailto:` and
+   `mailnotification:` fields on the vzdump job. Default
+   `mailnotification: always` is what you want; `failure` only sends on
+   errors.
+
+**Quick bisect:** `echo "test" | mail -s "manual test" you@inbox.com`
+from the PVE host. If THIS works, the relay is fine and the issue is
+PVE-side (cause 2 or 3). If it doesn't, the relay needs setup (cause 1).
+
+---
 
 ## 2026-06-28 12:15 CT — n8n died overnight (V8 heap OOM)
 
