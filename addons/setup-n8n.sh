@@ -317,6 +317,51 @@ else
   fi
 fi
 
+# ----- 1b. Harden the systemd unit ---------------------------------------
+# Two changes that make n8n survive longer overnight:
+#   - NODE_OPTIONS=--max-old-space-size=2048
+#     Node's default V8 heap limit is ~1.4GB on 64-bit. Under sustained
+#     load (e.g. Gitea webhook retries, MM credential 403 retries, big
+#     execution backlog) n8n OOMs and SIGABRTs itself with
+#     "FATAL ERROR: Ineffective mark-compacts near heap limit".
+#     Caught by user 2026-06-28 after the install died overnight at
+#     ~3h uptime, peak 1.3G memory. Bumping to 2GB gives V8 headroom
+#     and the CT (default 2GB RAM) can support it; bump CT RAM to 4GB
+#     if you want even more buffer.
+#   - Restart=on-failure + RestartSec=10
+#     If V8 OOMs again (or n8n panics for any reason) systemd brings
+#     it back up in 10 seconds instead of leaving it dead until you
+#     check on it the next morning.
+log "Hardening n8n systemd unit (NODE_OPTIONS + Restart=on-failure)..."
+if (( ! DRY_RUN )); then
+  pct exec "$CTID" -- bash -lc '
+    SVC=/etc/systemd/system/n8n.service
+    [[ -f "$SVC" ]] || SVC=/lib/systemd/system/n8n.service
+    [[ -f "$SVC" ]] || { echo "  n8n service unit not found — skipping hardening"; exit 0; }
+
+    # Backup once per change so re-runs are reversible
+    if ! grep -q "Environment=NODE_OPTIONS" "$SVC" || ! grep -q "^Restart=" "$SVC"; then
+      cp "$SVC" "${SVC}.bak.$(date +%s)"
+    fi
+
+    if ! grep -q "Environment=NODE_OPTIONS" "$SVC"; then
+      sed -i "/^\[Service\]/a Environment=NODE_OPTIONS=--max-old-space-size=2048" "$SVC"
+      echo "  ✓ Added NODE_OPTIONS=--max-old-space-size=2048"
+    else
+      echo "  - NODE_OPTIONS already set, skipping"
+    fi
+
+    if ! grep -q "^Restart=" "$SVC"; then
+      sed -i "/^\[Service\]/a Restart=on-failure\nRestartSec=10" "$SVC"
+      echo "  ✓ Added Restart=on-failure (10s)"
+    else
+      echo "  - Restart= already set, skipping"
+    fi
+  '
+  pct exec "$CTID" -- systemctl daemon-reload
+  pct exec "$CTID" -- systemctl restart n8n 2>/dev/null || true
+fi
+
 # ----- 2. Wait for n8n on port 5678 --------------------------------------
 log "Waiting for n8n on :5678..."
 if (( ! DRY_RUN )); then
