@@ -563,9 +563,19 @@ print(json.dumps({
     fi
   }
 
-  # 4a. Ollama (always create — even if CT is missing, URL is correct for when it's added later)
-  create_credential "Ollama (shared)" "ollamaApi" \
-    '{"baseUrl":"http://ollama-pi-agent:11434"}'
+  # 4a. Ollama — skipped on purpose.
+  #
+  # The native n8n Ollama node (@n8n/n8n-nodes-langchain.lmChatOllama) lives
+  # in the LangChain package and depends on credential type 'ollamaApi'.
+  # That credential type is ALSO rejected by n8n 2.x's public /api/v1
+  # whitelist ("not a known type"). And the matching node may not even be
+  # installed depending on the n8n image.
+  #
+  # The starter workflows now use a plain HTTP Request node hitting
+  # http://ollama-pi-agent:11434/api/chat directly. Ollama is unauthenticated
+  # on the tailnet so no credential is needed. Users building manual
+  # workflows that want the native Ollama node can add the credential via
+  # the n8n UI in 10 seconds.
 
   # 4b. Mattermost — only if creds present
   if [[ -n "$MM_BOT_TOKEN" ]]; then

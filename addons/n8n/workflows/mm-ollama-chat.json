@@ -46,33 +46,20 @@
     },
     {
       "parameters": {
-        "resource": "text",
-        "operation": "message",
-        "model": "gemma4:31b-cloud",
-        "messages": {
-          "messages": [
-            {
-              "role": "system",
-              "content": "You are a helpful assistant inside a small business's Mattermost. Keep replies short. Use Markdown. If you're not sure, say so."
-            },
-            {
-              "role": "user",
-              "content": "={{$json.body.text}}"
-            }
-          ]
-        },
-        "options": {}
+        "method": "POST",
+        "url": "http://ollama-pi-agent:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'gemma4:31b-cloud',\n  stream: false,\n  messages: [\n    { role: 'system', content: 'You are a helpful assistant inside a small business Mattermost. Keep replies short. Use Markdown. If unsure, say so.' },\n    { role: 'user', content: $json.body.text || '' }\n  ]\n}) }}",
+        "options": {
+          "timeout": 60000
+        }
       },
       "id": "aaaaaaaa-3333-3333-3333-aaaaaaaaaaaa",
-      "name": "Ollama",
-      "type": "n8n-nodes-base.ollama",
-      "typeVersion": 1,
-      "position": [800, 200],
-      "credentials": {
-        "ollamaApi": {
-          "name": "Ollama (shared)"
-        }
-      }
+      "name": "Ollama (HTTP /api/chat)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [800, 200]
     },
     {
       "parameters": {
@@ -114,7 +101,7 @@
       "main": [
         [
           {
-            "node": "Ollama",
+            "node": "Ollama (HTTP /api/chat)",
             "type": "main",
             "index": 0
           }
@@ -128,7 +115,7 @@
         ]
       ]
     },
-    "Ollama": {
+    "Ollama (HTTP /api/chat)": {
       "main": [
         [
           {
@@ -146,6 +133,6 @@
   },
   "tags": ["td-proxmox", "starter", "ai"],
   "meta": {
-    "description": "Mattermost outgoing webhook → Ollama → reply. To wire this up in Mattermost: System Console → Integrations → Outgoing Webhooks → Add. Content type: application/json. Callback URL: http://n8n:5678/webhook/mm-chat (or your tailnet host). Trigger words optional. Channel: pick #ai-chat (or any). The 'Skip if bot wrote it' IF guards against bot-talking-to-itself loops by checking user_name != pi-bot."
+    "description": "Mattermost outgoing webhook → Ollama HTTP /api/chat → reply. No credential needed for Ollama (it's an unauthenticated local service on the tailnet). To wire up: in Mattermost as admin, your avatar → Integrations → Outgoing Webhooks → Add. Content type: application/json. Callback URL: http://n8n:5678/webhook/mm-chat (or your tailnet host). Trigger words: '!ai' or leave empty to fire on every message in the chosen channel. Loop guard: skips if user_name == 'pi-bot' so the bot doesn't talk to itself."
   }
 }
