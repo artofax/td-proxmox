@@ -22,7 +22,7 @@ For pi (or you, writing scripts that pi runs) registering tiles on the Homepage 
 | [`setup-mattermost.sh`](setup-mattermost.sh) | Stand up a Mattermost CT (self-hosted team chat) + full auto-config: admin user, enable PATs, create default team, register Homepage tile with widget | new CT | ~10 min |
 | [`setup-pi-mattermost-bridge.sh`](setup-pi-mattermost-bridge.sh) | Wire bidirectional chat between pi (on `ollama-pi-agent`) and Mattermost. User types in a channel, pi reads + responds. Wraps `@whonixnetworks/pi-mattermost` v1.5.0 + local patches + systemd unit | `ollama-pi-agent` | ~3 min |
 | [`setup-homepage-pi-widgets.sh`](setup-homepage-pi-widgets.sh) | Add two `customapi` tiles to Homepage: (1) live bridge channel-count (orphans / persisted / active), (2) most recent message in #bot. Exposes the bridge on the tailnet and installs a tiny Python proxy on the Mattermost CT to reshape MM's posts response | `ollama-pi-agent`, `mattermost`, `homepage` | ~2 min |
-| [`setup-n8n.sh`](setup-n8n.sh) | Stand up an n8n CT and **auto-wire credentials** for everything in the stack: Ollama (shared), Mattermost (pi-bot), Gitea (admin), OpenWebUI (OpenAI-compat). Imports three starter workflows (`hello-mattermost`, `mm-ollama-chat`, `gitea-daily-digest`) so you can start composing instead of plumbing | new CT | ~10 min |
+| [`setup-n8n.sh`](setup-n8n.sh) | Stand up an n8n CT and **auto-wire credentials** for everything in the stack: Ollama (shared), Mattermost (pi-bot), Gitea (admin), OpenWebUI (OpenAI-compat). Imports four starter workflows (`hello-mattermost`, `mm-ollama-chat`, `gitea-daily-digest`, `gitea-events-to-mattermost`) so you can start composing instead of plumbing | new CT | ~10 min |
 
 ---
 
@@ -883,10 +883,11 @@ Stands up [n8n](https://n8n.io) — a self-hosted workflow automation platform �
   - `Gitea (admin) — Bearer` → same token, header-auth flavor for arbitrary REST calls
   - `OpenWebUI (OpenAI-compat)` → reads `OPENWEBUI_TOKEN` from `td-tokens.txt`
   - `TD shared webhook secret` → random `X-TD-Secret` header for trusted-caller webhook patterns
-- **Three starter workflows** imported as INACTIVE (review then activate):
+- **Four starter workflows** imported as INACTIVE (review then activate):
   - **`hello-mattermost`** — `POST /webhook/hello` → bot posts in `#town-square`. Smoke test that the Mattermost credential works.
-  - **`mm-ollama-chat`** — receives Mattermost's outgoing webhook → routes the message body through Ollama → posts the response back. Wire up Mattermost: *System Console → Integrations → Outgoing Webhooks → Add*, callback `http://n8n:5678/webhook/mm-chat`, pick a channel like `#ai-chat`. Includes a bot-loop guard (skips if `user_name == pi-bot`).
+  - **`mm-ollama-chat`** — receives Mattermost's outgoing webhook → routes the message body through Ollama → posts the response back. Wire up Mattermost: *your avatar → Integrations → Outgoing Webhooks → Add*, callback `http://n8n:5678/webhook/mm-chat`, pick a channel like `#ai-chat`. Includes a bot-loop guard (skips if `user_name == pi-bot`).
   - **`gitea-daily-digest`** — daily 9am cron → lists Gitea repos updated in last 24h → fetches their commits → posts a digest in `#town-square`.
+  - **`gitea-events-to-mattermost`** — receives Gitea system webhooks at `POST /webhook/gitea-events` and posts a formatted message per event (push, PR opened/merged/closed, PR review, issue opened/closed, issue comment, release published, branch/tag created, repo created/deleted, fork). Wire up Gitea: *Site Administration → Webhooks → Add Webhook → Gitea*. URL: `http://n8n:5678/webhook/gitea-events`. Method: POST. Content Type: application/json. Trigger On: "Send Everything" (or pick specific events). Active: yes. The workflow returns `{ok: true, posted: bool, event: <type>}` so the Gitea webhook delivery log shows whether each event was actionable.
 - Homepage tile under `Automation → n8n`
 - All marker-strip + backup safety we use elsewhere — re-run any time
 
