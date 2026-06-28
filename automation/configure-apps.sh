@@ -474,6 +474,39 @@ configure_gitea() {
     GITEA_TOKEN="DRYRUN_GITEA_TOKEN_PLACEHOLDER"
   fi
 
+  # ----- webhook SSRF allowlist -----
+  # Gitea blocks outgoing webhooks to RFC1918 addresses by default (anti-SSRF
+  # protection — same architectural pattern as Mattermost's
+  # AllowedUntrustedInternalConnections). With it empty, any in-stack webhook
+  # (gitea → n8n, gitea → mattermost, etc.) silently fails with:
+  #   "webhook can only call allowed HTTP servers (check your webhook.ALLOWED_HOST_LIST setting)"
+  # Set it to cover all RFC1918 + loopback + Tailscale CGNAT so any private-IP
+  # target in the stack works. (Caught by user 2026-06-28 wiring up
+  # gitea-events-to-mattermost.)
+  log "  Setting [webhook] ALLOWED_HOST_LIST in $GITEA_CONFIG..."
+  if (( ! DRY_RUN )); then
+    pct exec "$GITEA_CTID" -- bash -lc "
+      cfg='$GITEA_CONFIG'
+      allowed='private,loopback,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10'
+      if grep -q '^\[webhook\]' \"\$cfg\"; then
+        if awk '/^\[webhook\]/,/^\[/' \"\$cfg\" | grep -q '^ALLOWED_HOST_LIST'; then
+          # Replace existing line within the [webhook] section only
+          sed -i \"/^\[webhook\]/,/^\[/ s|^ALLOWED_HOST_LIST.*|ALLOWED_HOST_LIST = \$allowed|\" \"\$cfg\"
+        else
+          sed -i \"/^\[webhook\]/a ALLOWED_HOST_LIST = \$allowed\" \"\$cfg\"
+        fi
+      else
+        printf '\n[webhook]\nALLOWED_HOST_LIST = %s\n' \"\$allowed\" >> \"\$cfg\"
+      fi
+    "
+    # HUP gitea so the new config takes effect (vs. restart, which would
+    # interrupt in-flight HTTP)
+    run "pct exec $GITEA_CTID -- systemctl reload gitea 2>/dev/null || pct exec $GITEA_CTID -- systemctl restart gitea"
+    sleep 3
+  else
+    log "  [dry-run] Would set ALLOWED_HOST_LIST = private,loopback,... and reload gitea"
+  fi
+
   log "  Gitea reachable at: http://$GITEA_IP:3000"
 }
 
