@@ -60,6 +60,18 @@ run()  { if (( DRY_RUN )); then printf "[dry-run] %s\n" "$*"; else eval "$@"; fi
 [[ $EUID -eq 0 ]] || die "Run as root on the PVE host."
 command -v postfix >/dev/null || die "postfix not installed — apt install postfix libsasl2-modules"
 
+# Postfix ships without SASL client mechanisms by default on Debian/PVE.
+# Without libsasl2-modules, SMTP AUTH fails with:
+#   "no mechanism available" / "No worthy mechs found"
+# Install it explicitly — idempotent (apt skips if already installed).
+if ! dpkg -l libsasl2-modules 2>/dev/null | grep -q '^ii'; then
+  log "Installing libsasl2-modules (required for SMTP AUTH to relay)..."
+  if (( ! DRY_RUN )); then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y libsasl2-modules >/dev/null 2>&1 \
+      || die "Failed to install libsasl2-modules. Run 'apt update && apt install libsasl2-modules' manually."
+  fi
+fi
+
 # Auto-detect tokens file if not specified
 if [[ -z "$TOKENS_FILE" ]]; then
   for f in /root/td-tokens.txt /root/studio-tokens.txt /root/founder-tokens.txt; do
@@ -228,7 +240,10 @@ log "================================================================"
 log "==> PVE email relay configured."
 log " "
 log "  Relay host:   $SMTP_HOST:$SMTP_PORT"
-log "  Auth user:    $SMTP_USERNAME"
+# Postmark (and some other providers) use the same Server API Token for
+# both SMTP username AND password. So SMTP_USERNAME is the actual secret —
+# redact in output to avoid leaking it when users paste run output.
+log "  Auth user:    ${SMTP_USERNAME:0:8}... (redacted; full value in $TOKENS_FILE)"
 log "  From address: $SMTP_FROM ($SMTP_FROM_NAME)"
 log "  root → :      $ADMIN_NOTIFY_EMAIL"
 log " "
