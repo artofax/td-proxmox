@@ -93,9 +93,20 @@ find_ct_by_hostname() {
 }
 
 read_token() {
-  local key="$1"
+  # Returns the LAST occurrence of key= in the tokens file (so a later
+  # 'echo K=v >>' overrides any earlier line). Also strips obvious
+  # placeholder values like "<paste here>" or "REPLACE_ME".
+  local key="$1" val
   [[ -f "$TOKENS_FILE" ]] || return 1
-  awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, "", $0); print; exit }' "$TOKENS_FILE"
+  val="$(awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, "", $0); v = $0 } END { print v }' "$TOKENS_FILE")"
+  # Strip surrounding whitespace
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
+  # Drop placeholder values
+  case "$val" in
+    "<"*">"|""|"REPLACE_ME"|"CHANGEME"|"changeme") return 1 ;;
+  esac
+  printf '%s\n' "$val"
 }
 
 upsert_token() {
@@ -640,7 +651,7 @@ log "==> n8n installed and wired."
 log " "
 log "  Hostname:  $N8N_HOSTNAME (CT $CTID)"
 log "  URL:       http://$N8N_HOSTNAME:5678"
-log "  Login:     $ADMIN_EMAIL / (admin password from $TOKENS_FILE)"
+log "  Login:     $N8N_OWNER_EMAIL / (n8n owner password from $TOKENS_FILE)"
 if [[ -n "${N8N_API_KEY:-}" ]]; then
   log "  API key:   N8N_API_KEY in $TOKENS_FILE"
 fi

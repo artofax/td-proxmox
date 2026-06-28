@@ -19,7 +19,22 @@ find_ct_by_hostname() {
 CTID="$(find_ct_by_hostname n8n 2>/dev/null || true)"
 [[ -n "$CTID" ]] || { echo "no n8n CT found"; exit 1; }
 
-API_KEY="$(awk -F= '/^N8N_API_KEY=/ {sub(/^[^=]*=/, "", $0); print; exit}' /root/td-tokens.txt 2>/dev/null || true)"
+# Read LAST occurrence (so later 'echo K=v >>' wins over earlier ones).
+API_KEY="$(awk -F= '/^N8N_API_KEY=/ {sub(/^[^=]*=/,"",$0); v=$0} END {print v}' /root/td-tokens.txt 2>/dev/null || true)"
+# Strip whitespace
+API_KEY="${API_KEY#"${API_KEY%%[![:space:]]*}"}"
+API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"
+# Reject obvious placeholders
+case "$API_KEY" in "<"*">"|"REPLACE_ME"|"CHANGEME") API_KEY="" ;; esac
+
+# Warn if tokens file has duplicates
+DUPES="$(grep -c '^N8N_API_KEY=' /root/td-tokens.txt 2>/dev/null || echo 0)"
+if (( DUPES > 1 )); then
+  echo "!!! /root/td-tokens.txt has $DUPES lines starting with N8N_API_KEY="
+  echo "!!! Only the LAST one is used. Fix with:"
+  echo "!!!   sed -i '/^N8N_API_KEY=<paste/d' /root/td-tokens.txt"
+  echo
+fi
 
 echo "=== n8n CT: $CTID ==="
 echo
