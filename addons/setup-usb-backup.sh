@@ -55,8 +55,20 @@ run()  { if (( DRY_RUN )); then printf "[dry-run] %s\n" "$*"; else eval "$@"; fi
 [[ $EUID -eq 0 ]] || die "Run as root on the PVE host."
 command -v lsblk >/dev/null || die "lsblk required."
 command -v pvesm >/dev/null || die "pvesm required (PVE host)."
-command -v parted >/dev/null || die "parted not installed — apt install parted"
-command -v mkfs.ext4 >/dev/null || die "mkfs.ext4 not installed — apt install e2fsprogs"
+
+# PVE ships without parted by default; e2fsprogs is usually present but check
+# anyway. Both are tiny — auto-install idempotently. Same pattern setup-pve-email.sh
+# uses for libsasl2-modules.
+NEED_APT=()
+command -v parted    >/dev/null || NEED_APT+=(parted)
+command -v mkfs.ext4 >/dev/null || NEED_APT+=(e2fsprogs)
+if (( ${#NEED_APT[@]} > 0 )); then
+  log "Installing missing tools: ${NEED_APT[*]}"
+  if (( ! DRY_RUN )); then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${NEED_APT[@]}" >/dev/null 2>&1 \
+      || die "Failed to install: ${NEED_APT[*]}. Run 'apt update && apt install ${NEED_APT[*]}' manually."
+  fi
+fi
 
 # ----- uninstall path ---------------------------------------------------
 if (( UNINSTALL )); then
