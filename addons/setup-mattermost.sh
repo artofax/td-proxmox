@@ -476,6 +476,16 @@ ss['WebsocketURL']               = ''
 ss['AllowedUntrustedInternalConnections'] = 'localhost 127.0.0.1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 n8n ollama-pi-agent gitea openwebui homepage sandbox mattermost'
 ss['EnablePostUsernameOverride'] = True
 ss['EnablePostIconOverride']     = True
+# 9. EnableDynamicClientRegistration — user's recollection (2026-06-28) is
+#    that THIS flag, not AllowedUntrustedInternalConnections, was the actual
+#    setting that unblocked outgoing webhooks on a previous install. The
+#    config-diff showed CT 115 (the working one) had this flag = true while
+#    112 + 121 had it = false. There's no documented connection between this
+#    OAuth-server feature and webhook handling, so it may be an unintended
+#    side-effect / bug. Setting both flags here is belt-and-suspenders: if
+#    the SSRF whitelist is the real fix, this is harmless. If this flag is
+#    the real fix (a bug somewhere in MM's request pipeline), we're covered.
+ss['EnableDynamicClientRegistration'] = True
 c.setdefault('EmailSettings', {})['RequireEmailVerification'] = False
 print(json.dumps(c))
 " 2>/dev/null || true)
