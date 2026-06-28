@@ -299,14 +299,16 @@ log "Setting up n8n owner account..."
 if (( ! DRY_RUN )); then
   # POST /rest/owner/setup — accepts {email, firstName, lastName, password}
   # If already done, returns 400; we treat that as "already done" and move on.
-  OWNER_BODY="$(python3 -c "
+  # Env vars MUST be prefixed before python3 — they're env to the command,
+  # not argv. (Bash's KEY=VAL prefix only applies as env when at the start.)
+  OWNER_BODY="$(ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_USER="$ADMIN_USER" ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 -c '
 import json, os
 print(json.dumps({
-  'email':     os.environ['ADMIN_EMAIL'],
-  'firstName': os.environ['ADMIN_USER'],
-  'lastName':  'Admin',
-  'password':  os.environ['ADMIN_PASSWORD'],
-}))" ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_USER="$ADMIN_USER" ADMIN_PASSWORD="$ADMIN_PASSWORD")"
+  "email":     os.environ["ADMIN_EMAIL"],
+  "firstName": os.environ["ADMIN_USER"],
+  "lastName":  "Admin",
+  "password":  os.environ["ADMIN_PASSWORD"],
+}))')"
 
   OWNER_RESP="$(n8n_curl POST /rest/owner/setup "$OWNER_BODY" 2> /tmp/n8n-owner.code)"
   OWNER_CODE="$(awk '{print $2}' /tmp/n8n-owner.code 2>/dev/null)"
@@ -317,16 +319,27 @@ print(json.dumps({
       ;;
     400|409)
       log "  Owner already exists (HTTP $OWNER_CODE) — logging in"
-      LOGIN_BODY="$(python3 -c "
+      LOGIN_BODY="$(ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 -c '
 import json, os
-print(json.dumps({'emailOrLdapLoginId': os.environ['ADMIN_EMAIL'], 'email': os.environ['ADMIN_EMAIL'], 'password': os.environ['ADMIN_PASSWORD']}))
-" ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_PASSWORD="$ADMIN_PASSWORD")"
-      LOGIN_RESP="$(n8n_curl POST /rest/login "$LOGIN_BODY" 2> /tmp/n8n-login.code)"
-      LOGIN_CODE="$(awk '{print $2}' /tmp/n8n-login.code 2>/dev/null)"
-      if [[ "$LOGIN_CODE" =~ ^2 ]]; then
-        log "  ✓ Logged in (HTTP $LOGIN_CODE)"
-      else
-        warn "  Login HTTP $LOGIN_CODE — body:"
+print(json.dumps({
+  "emailOrLdapLoginId": os.environ["ADMIN_EMAIL"],
+  "email":              os.environ["ADMIN_EMAIL"],
+  "password":           os.environ["ADMIN_PASSWORD"],
+}))')"
+      # n8n 1.x uses /rest/login; n8n 2.x may use /rest/auth/login. Try both.
+      LOGGED_IN=0
+      for ep in /rest/login /rest/auth/login; do
+        LOGIN_RESP="$(n8n_curl POST "$ep" "$LOGIN_BODY" 2> /tmp/n8n-login.code)"
+        LOGIN_CODE="$(awk '{print $2}' /tmp/n8n-login.code 2>/dev/null)"
+        log "  Trying $ep — HTTP $LOGIN_CODE"
+        if [[ "$LOGIN_CODE" =~ ^2 ]]; then
+          log "  ✓ Logged in via $ep"
+          LOGGED_IN=1
+          break
+        fi
+      done
+      if (( ! LOGGED_IN )); then
+        warn "  Login failed on all known endpoints. Last response:"
         echo "$LOGIN_RESP" | head -3 | sed 's/^/    /' >&2
       fi
       ;;
