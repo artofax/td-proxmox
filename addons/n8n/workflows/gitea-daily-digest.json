@@ -38,7 +38,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Build a list of {owner, repo} from the search result + filter to repos updated in last 24h\nconst items = $json.data || [];\nconst cutoff = Date.now() - 24*60*60*1000;\nconst keep = [];\nfor (const r of items) {\n  if (new Date(r.updated_at).getTime() >= cutoff) {\n    keep.push({json: {owner: r.owner.login, repo: r.name, full: r.full_name, updated: r.updated_at}});\n  }\n}\nreturn keep;"
+        "jsCode": "// Build a list of {owner, repo} from the search result + filter to:\n//   - updated in last 24h\n//   - NOT empty (Gitea returns 409 on /commits for empty repos)\nconst items = $json.data || [];\nconst cutoff = Date.now() - 24*60*60*1000;\nconst keep = [];\nfor (const r of items) {\n  if (r.empty) continue;\n  if (new Date(r.updated_at).getTime() >= cutoff) {\n    keep.push({json: {owner: r.owner.login, repo: r.name, full: r.full_name, updated: r.updated_at}});\n  }\n}\nreturn keep;"
       },
       "id": "bbbbbbbb-3333-3333-3333-bbbbbbbbbbbb",
       "name": "Filter recent",
@@ -58,6 +58,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1080, 300],
+      "onError": "continueRegularOutput",
       "credentials": {
         "httpHeaderAuth": {
           "name": "Gitea (admin) — Bearer"
@@ -66,7 +67,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Reduce all commits across all repos into a digest message\nconst cutoff = Date.now() - 24*60*60*1000;\nconst lines = [];\nlet repoCount = 0;\nlet commitCount = 0;\n\nfor (const item of $input.all()) {\n  const commits = (item.json || []).filter(c => new Date(c.created || c.commit?.author?.date || 0).getTime() >= cutoff);\n  if (!commits.length) continue;\n  repoCount++;\n  const meta = item.json[0]?.repository || {};\n  const repoName = meta.full_name || 'unknown';\n  lines.push(`**${repoName}** (${commits.length} commit${commits.length>1?'s':''})`);\n  for (const c of commits.slice(0, 5)) {\n    const msg = (c.commit?.message || c.message || '').split('\\n')[0].slice(0, 90);\n    const who = c.commit?.author?.name || c.author?.login || 'unknown';\n    lines.push(`  • ${msg} — _${who}_`);\n    commitCount++;\n  }\n  if (commits.length > 5) lines.push(`  • …and ${commits.length-5} more`);\n}\n\nlet text;\nif (!lines.length) {\n  text = ':sleeping: No Gitea activity in the last 24 hours.';\n} else {\n  text = `:newspaper: **Daily Gitea digest** — ${commitCount} commits across ${repoCount} repo${repoCount>1?'s':''}\\n\\n${lines.join('\\n')}`;\n}\n\nreturn [{json: {text}}];"
+        "jsCode": "// Reduce all commits across all repos into a digest message.\n// Defensive: items from upstream may be:\n//   - an array of commit objects (success)\n//   - null/undefined (HTTP node errored on a 4xx with continueRegularOutput)\n//   - a single object with .error (n8n's error envelope)\nconst cutoff = Date.now() - 24*60*60*1000;\nconst lines = [];\nlet repoCount = 0;\nlet commitCount = 0;\n\nfor (const item of $input.all()) {\n  const raw = item.json;\n  if (!raw || raw.error || !Array.isArray(raw)) continue;\n  const commits = raw.filter(c => new Date(c.created || c.commit?.author?.date || 0).getTime() >= cutoff);\n  if (!commits.length) continue;\n  repoCount++;\n  const meta = raw[0]?.repository || {};\n  const repoName = meta.full_name || 'unknown';\n  lines.push(`**${repoName}** (${commits.length} commit${commits.length>1?'s':''})`);\n  for (const c of commits.slice(0, 5)) {\n    const msg = (c.commit?.message || c.message || '').split('\\n')[0].slice(0, 90);\n    const who = c.commit?.author?.name || c.author?.login || 'unknown';\n    lines.push(`  • ${msg} — _${who}_`);\n    commitCount++;\n  }\n  if (commits.length > 5) lines.push(`  • …and ${commits.length-5} more`);\n}\n\nlet text;\nif (!lines.length) {\n  text = ':sleeping: No Gitea activity in the last 24 hours.';\n} else {\n  text = `:newspaper: **Daily Gitea digest** — ${commitCount} commits across ${repoCount} repo${repoCount>1?'s':''}\\n\\n${lines.join('\\n')}`;\n}\n\nreturn [{json: {text}}];"
       },
       "id": "bbbbbbbb-5555-5555-5555-bbbbbbbbbbbb",
       "name": "Format digest",
