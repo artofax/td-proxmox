@@ -169,7 +169,14 @@ log "Patching /etc/postfix/main.cf for relay through $SMTP_HOST..."
 # Use postconf to make changes idempotent — it handles existing keys safely
 if (( ! DRY_RUN )); then
   postconf -e "relayhost = [$SMTP_HOST]:$SMTP_PORT"
-  postconf -e "smtp_use_tls = yes"
+  # smtp_tls_security_level = encrypt enforces STARTTLS on port 587.
+  # Older 'smtp_use_tls = yes' was deprecated in postfix 3.x; new param is
+  # less ambiguous: 'may' = opportunistic, 'encrypt' = required, 'verify' =
+  # required + cert validation. Postmark requires TLS so 'encrypt' is right.
+  postconf -e "smtp_tls_security_level = encrypt"
+  # Strip the deprecated param if a prior version of this script left it
+  # in main.cf — postconf -X errors if missing, so check first.
+  postconf smtp_use_tls 2>/dev/null | grep -q '^smtp_use_tls' && postconf -X smtp_use_tls 2>/dev/null || true
   postconf -e "smtp_sasl_auth_enable = yes"
   postconf -e "smtp_sasl_security_options = noanonymous"
   postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
