@@ -197,30 +197,36 @@ OW_CTID="$(find_ct_by_hostname openwebui 2>/dev/null || true)"
 # resolve in n8n 2.x's Mattermost node.
 MM_TEAM_ID="$(read_token MATTERMOST_TEAM_ID || true)"
 if [[ -n "$MM_CTID" && -n "$MM_BOT_TOKEN" && -n "$MM_TEAM_ID" ]]; then
+  # Helper to extract a real channel UUID from a /api/v4/...channels/name/<n>
+  # response. MM's error responses ALSO have an "id" field (containing the
+  # error code string), so we need to also check that status_code is absent
+  # or 200. A real MM channel id is a 26-char alphanumeric string.
+  _mm_pick_channel_id() {
+    pct exec "$MM_CTID" -- bash -lc "
+      curl -sS -H 'Authorization: Bearer $MM_BOT_TOKEN' '$1' \
+      | python3 -c 'import sys,json
+try:
+  d = json.load(sys.stdin)
+  sc = d.get(\"status_code\", 200)
+  cid = d.get(\"id\", \"\")
+  # Real MM ids are 26 chars [a-z0-9]; error ids contain dots
+  if sc == 200 and len(cid) == 26 and \".\" not in cid:
+    print(cid)
+except: pass'
+    " 2>/dev/null || true
+  }
+
   if [[ -z "$MM_TOWNSQUARE_CHANNEL_ID" ]]; then
     log "  Resolving #town-square channel ID via MM API..."
-    MM_TOWNSQUARE_CHANNEL_ID="$(pct exec "$MM_CTID" -- bash -lc "
-      curl -sS -H 'Authorization: Bearer $MM_BOT_TOKEN' \
-        http://localhost:8065/api/v4/teams/$MM_TEAM_ID/channels/name/town-square \
-        | python3 -c 'import sys,json
-try: print(json.load(sys.stdin).get(\"id\",\"\"))
-except: print(\"\")'
-    " 2>/dev/null || true)"
+    MM_TOWNSQUARE_CHANNEL_ID="$(_mm_pick_channel_id "http://localhost:8065/api/v4/teams/$MM_TEAM_ID/channels/name/town-square")"
     [[ -n "$MM_TOWNSQUARE_CHANNEL_ID" ]] && log "    town-square = $MM_TOWNSQUARE_CHANNEL_ID"
   fi
   if [[ -z "$MM_AICHAT_CHANNEL_ID" ]]; then
     log "  Resolving #ai-chat channel ID via MM API..."
-    MM_AICHAT_CHANNEL_ID="$(pct exec "$MM_CTID" -- bash -lc "
-      curl -sS -H 'Authorization: Bearer $MM_BOT_TOKEN' \
-        http://localhost:8065/api/v4/teams/$MM_TEAM_ID/channels/name/ai-chat \
-        | python3 -c 'import sys,json
-try: print(json.load(sys.stdin).get(\"id\",\"\"))
-except: print(\"\")'
-    " 2>/dev/null || true)"
+    MM_AICHAT_CHANNEL_ID="$(_mm_pick_channel_id "http://localhost:8065/api/v4/teams/$MM_TEAM_ID/channels/name/ai-chat")"
     if [[ -n "$MM_AICHAT_CHANNEL_ID" ]]; then
       log "    ai-chat = $MM_AICHAT_CHANNEL_ID"
     else
-      # ai-chat doesn't exist yet — fall back to town-square
       log "    ai-chat not found — workflows will use town-square instead"
       MM_AICHAT_CHANNEL_ID="$MM_TOWNSQUARE_CHANNEL_ID"
     fi
@@ -721,15 +727,17 @@ if [[ -n "${N8N_API_KEY:-}" ]]; then
 fi
 log " "
 log "Credentials wired:"
-log "  ✓ Ollama (shared) — Ollama node points at http://ollama-pi-agent:11434"
 [[ -n "$MM_BOT_TOKEN" ]] && log "  ✓ Mattermost (pi-bot) — Mattermost node uses bot account"
-[[ -n "$GITEA_TOKEN"  ]] && log "  ✓ Gitea (admin) — Gitea node uses admin PAT"
+[[ -n "$GITEA_TOKEN"  ]] && log "  ✓ Gitea (admin) — Bearer — HTTP Request can hit any Gitea endpoint"
 [[ -n "$OPENWEBUI_TOKEN" ]] && log "  ✓ OpenWebUI (OpenAI-compat) — OpenAI node points at OpenWebUI"
+log "  ✓ TD shared webhook secret — header-auth credential for trusted-caller patterns"
+log " "
+log "  (Ollama needs no credential — starter workflow hits http://ollama-pi-agent:11434/api/chat directly)"
 log " "
 log "Starter workflows imported (INACTIVE — review then activate):"
-log "  - hello-mattermost: POST /webhook/hello → posts 'hello world' in #general"
-log "  - mm-ollama-chat: mentions in #ai-chat get an Ollama-generated reply"
-log "  - gitea-daily-digest: daily 9am cron → last 24h commits → posts in #general"
+log "  - hello-mattermost: POST /webhook/hello → posts 'hello world' in #town-square"
+log "  - mm-ollama-chat: messages in #ai-chat get an Ollama-generated reply"
+log "  - gitea-daily-digest: daily 9am cron → last 24h commits → posts in #town-square"
 log " "
 log "Next steps:"
 log "  1. Open http://$N8N_HOSTNAME:5678 and sign in"
