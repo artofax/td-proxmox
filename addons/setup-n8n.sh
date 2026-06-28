@@ -172,6 +172,8 @@ CT_PASSWORD="$(read_token CT_PASSWORD || true)"
 
 # Tokens needed for wiring (warn if missing — we proceed without those creds)
 MM_BOT_TOKEN="$(read_token MATTERMOST_BOT_TOKEN || true)"
+MM_TOWNSQUARE_CHANNEL_ID="$(read_token MATTERMOST_TOWNSQUARE_CHANNEL_ID || true)"
+MM_AICHAT_CHANNEL_ID="$(read_token MATTERMOST_AICHAT_CHANNEL_ID || true)"
 MM_TEAM_ID="$(read_token MATTERMOST_TEAM_ID || true)"
 MM_URL="$(read_token MATTERMOST_URL || true)"
 [[ -z "$MM_URL" ]] && MM_URL="http://mattermost:8065"
@@ -188,6 +190,42 @@ OW_CTID="$(find_ct_by_hostname openwebui 2>/dev/null || true)"
 [[ -z "$MM_CTID" || -z "$MM_BOT_TOKEN" ]] && warn "  Mattermost CT/token missing — MM credential will be skipped."
 [[ -z "$GITEA_CTID" || -z "$GITEA_TOKEN" ]] && warn "  Gitea CT/token missing — Gitea credential will be skipped."
 [[ -z "$OW_CTID" ]] && warn "  openwebui CT not found — OpenWebUI credential will be skipped."
+
+# Fallback: if the channel IDs aren't in tokens (older setup-mattermost.sh
+# install), look them up live via the Mattermost API. We need real UUIDs to
+# patch into the starter workflow JSONs — slugs like "town-square" don't
+# resolve in n8n 2.x's Mattermost node.
+MM_TEAM_ID="$(read_token MATTERMOST_TEAM_ID || true)"
+if [[ -n "$MM_CTID" && -n "$MM_BOT_TOKEN" && -n "$MM_TEAM_ID" ]]; then
+  if [[ -z "$MM_TOWNSQUARE_CHANNEL_ID" ]]; then
+    log "  Resolving #town-square channel ID via MM API..."
+    MM_TOWNSQUARE_CHANNEL_ID="$(pct exec "$MM_CTID" -- bash -lc "
+      curl -sS -H 'Authorization: Bearer $MM_BOT_TOKEN' \
+        http://localhost:8065/api/v4/teams/$MM_TEAM_ID/channels/name/town-square \
+        | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get(\"id\",\"\"))
+except: print(\"\")'
+    " 2>/dev/null || true)"
+    [[ -n "$MM_TOWNSQUARE_CHANNEL_ID" ]] && log "    town-square = $MM_TOWNSQUARE_CHANNEL_ID"
+  fi
+  if [[ -z "$MM_AICHAT_CHANNEL_ID" ]]; then
+    log "  Resolving #ai-chat channel ID via MM API..."
+    MM_AICHAT_CHANNEL_ID="$(pct exec "$MM_CTID" -- bash -lc "
+      curl -sS -H 'Authorization: Bearer $MM_BOT_TOKEN' \
+        http://localhost:8065/api/v4/teams/$MM_TEAM_ID/channels/name/ai-chat \
+        | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get(\"id\",\"\"))
+except: print(\"\")'
+    " 2>/dev/null || true)"
+    if [[ -n "$MM_AICHAT_CHANNEL_ID" ]]; then
+      log "    ai-chat = $MM_AICHAT_CHANNEL_ID"
+    else
+      # ai-chat doesn't exist yet — fall back to town-square
+      log "    ai-chat not found — workflows will use town-square instead"
+      MM_AICHAT_CHANNEL_ID="$MM_TOWNSQUARE_CHANNEL_ID"
+    fi
+  fi
+fi
 
 # ----- uninstall path ----------------------------------------------------
 if (( UNINSTALL )); then
@@ -537,15 +575,14 @@ import json, os
 print(json.dumps({"accessToken": os.environ["MM_BOT_TOKEN"], "baseUrl": os.environ["MM_URL"]}))')"
   fi
 
-  # 4c. Gitea — only if creds present
+  # 4c. Gitea — header-auth only (n8n 2.x doesn't accept giteaApi via public API)
   if [[ -n "$GITEA_TOKEN" ]]; then
-    create_credential "Gitea (admin)" "giteaApi" \
-      "$(GITEA_TOKEN="$GITEA_TOKEN" python3 -c '
-import json, os
-print(json.dumps({"server": "http://gitea:3000", "accessToken": os.environ["GITEA_TOKEN"]}))')"
-    # Plus a header-auth credential for arbitrary REST calls — n8n's native
-    # Gitea node covers issues/repos but not every endpoint, so the digest
-    # workflow uses HTTP Request + this header credential against /api/v1.
+    # n8n 2.x's public /api/v1/credentials rejects giteaApi as "not a known
+    # type" (the type still exists in the UI's whitelist but not the REST
+    # whitelist). The header-auth credential is functionally equivalent for
+    # every Gitea REST call, so we skip the native one and just create the
+    # bearer flavor. Users who want to use the native Gitea node directly
+    # in a UI-built workflow can add the credential through the UI.
     create_credential "Gitea (admin) — Bearer" "httpHeaderAuth" \
       "$(GITEA_TOKEN="$GITEA_TOKEN" python3 -c '
 import json, os
@@ -586,18 +623,35 @@ else
       [[ -f "$wf" ]] || continue
       WF_NAME="$(basename "$wf" .json)"
 
-      # Read + clean the JSON locally (no shell-quoting hell)
-      WF_BODY="$(WF_PATH="$wf" python3 -c '
+      # Read + clean the JSON locally; also patch real Mattermost channel
+      # UUIDs into any Mattermost node (n8n 2.x's MM node doesn't resolve
+      # channel slugs like "town-square" — it needs the 26-char UUID).
+      WF_BODY="$(WF_PATH="$wf" \
+        TOWNSQUARE_ID="${MM_TOWNSQUARE_CHANNEL_ID:-}" \
+        AICHAT_ID="${MM_AICHAT_CHANNEL_ID:-}" \
+        python3 -c '
 import json, os
 with open(os.environ["WF_PATH"]) as f:
     w = json.load(f)
+
+# Patch channel IDs in any Mattermost node.
+ts = os.environ.get("TOWNSQUARE_ID", "")
+ai = os.environ.get("AICHAT_ID", "")
+for node in w.get("nodes", []):
+    if node.get("type") == "n8n-nodes-base.mattermost":
+        p = node.setdefault("parameters", {})
+        ch = p.get("channelId", "")
+        if ch == "town-square" and ts:
+            p["channelId"] = ts
+        elif ch == "ai-chat" and ai:
+            p["channelId"] = ai
+
+# Strip metadata the public API rejects
 for k in ("id", "createdAt", "updatedAt", "versionId", "shared", "meta", "tags"):
     w.pop(k, None)
 w["active"] = False
-# n8n public API expects only these top-level keys on workflow POST:
-#   name, nodes, connections, settings, staticData (optional)
-allowed = {"name","nodes","connections","settings","staticData"}
-w = {k:v for k,v in w.items() if k in allowed}
+allowed = {"name", "nodes", "connections", "settings", "staticData"}
+w = {k: v for k, v in w.items() if k in allowed}
 w.setdefault("settings", {"executionOrder": "v1"})
 print(json.dumps(w))')"
 

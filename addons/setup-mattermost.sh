@@ -629,6 +629,58 @@ print(json.dumps(c))
           _mm_post "/api/v4/channels/$MM_BOT_CHANNEL_ID/members" "$CHM_BODY" "$AUTH_HEADER" >/dev/null
           log "  Added pi-bot to #bot channel."
         fi
+
+        # ----- ensure pi-bot is a member of standard channels too -----
+        # Workflows from setup-n8n.sh (and any other automation) tend to post
+        # to town-square by default. Without bot membership Mattermost returns
+        # 403 on POST. Also create #ai-chat for the Ollama-chat workflow.
+        _mm_add_bot_to_channel() {
+          local channel_name="$1" channel_id="$2"
+          [[ -z "$channel_id" ]] && return 0
+          local body status
+          body=$(printf '{"user_id":"%s"}' "$MM_BOT_USER_ID")
+          local resp
+          resp=$(_mm_post "/api/v4/channels/$channel_id/members" "$body" "$AUTH_HEADER")
+          status=$(_mm_status "$resp")
+          case "$status" in
+            200|201) log "  Added pi-bot to #$channel_name." ;;
+            400)     log "  pi-bot already a member of #$channel_name." ;;
+            *)       warn "  Adding pi-bot to #$channel_name returned HTTP $status." ;;
+          esac
+        }
+
+        # town-square — already exists in every team
+        log "  Looking up #town-square..."
+        TS_LOOKUP=$(_mm_get "/api/v4/teams/$MM_TEAM_ID/channels/name/town-square" "$AUTH_HEADER")
+        TS_STATUS=$(_mm_status "$TS_LOOKUP")
+        if [[ "$TS_STATUS" == "200" ]]; then
+          MM_TOWNSQUARE_CHANNEL_ID=$(_mm_body "$TS_LOOKUP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+          log "  #town-square id: $MM_TOWNSQUARE_CHANNEL_ID"
+          _mm_add_bot_to_channel "town-square" "$MM_TOWNSQUARE_CHANNEL_ID"
+        else
+          warn "  Could not look up #town-square (HTTP $TS_STATUS)."
+        fi
+
+        # ai-chat — create if missing, add bot
+        log "  Ensuring #ai-chat exists..."
+        AI_CHAT_BODY=$(printf '{"team_id":"%s","name":"ai-chat","display_name":"AI Chat","type":"O","purpose":"Talk to the homelab Ollama agents via the n8n bridge"}' "$MM_TEAM_ID")
+        AICRESP=$(_mm_post "/api/v4/channels" "$AI_CHAT_BODY" "$AUTH_HEADER")
+        AICSTATUS=$(_mm_status "$AICRESP")
+        AICBODY=$(_mm_body "$AICRESP")
+        if [[ "$AICSTATUS" == "200" || "$AICSTATUS" == "201" ]]; then
+          MM_AICHAT_CHANNEL_ID=$(echo "$AICBODY" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+          log "  #ai-chat channel created: id=$MM_AICHAT_CHANNEL_ID"
+        elif [[ "$AICSTATUS" == "400" ]]; then
+          log "  #ai-chat already exists — fetching id..."
+          AILOOKUP=$(_mm_get "/api/v4/teams/$MM_TEAM_ID/channels/name/ai-chat" "$AUTH_HEADER")
+          AILSTATUS=$(_mm_status "$AILOOKUP")
+          if [[ "$AILSTATUS" == "200" ]]; then
+            MM_AICHAT_CHANNEL_ID=$(_mm_body "$AILOOKUP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+          fi
+        else
+          warn "  #ai-chat create returned HTTP $AICSTATUS. Body: $AICBODY"
+        fi
+        _mm_add_bot_to_channel "ai-chat" "${MM_AICHAT_CHANNEL_ID:-}"
       fi
     fi
   fi
@@ -717,13 +769,15 @@ MATTERMOST_TEAM_ID=${MM_TEAM_ID:-}
 MATTERMOST_BOT_USER_ID=${MM_BOT_USER_ID:-}
 MATTERMOST_BOT_TOKEN=${MM_BOT_TOKEN:-}
 MATTERMOST_BOT_CHANNEL_ID=${MM_BOT_CHANNEL_ID:-}
+MATTERMOST_TOWNSQUARE_CHANNEL_ID=${MM_TOWNSQUARE_CHANNEL_ID:-}
+MATTERMOST_AICHAT_CHANNEL_ID=${MM_AICHAT_CHANNEL_ID:-}
 EOF
 
   # Surface which values are populated so the user sees the partial-success
   # state without having to cat the file.
   log "  Wrote — populated fields:"
-  for var in MM_TOKEN MM_TEAM_ID MM_BOT_USER_ID MM_BOT_TOKEN MM_BOT_CHANNEL_ID; do
-    if [[ -n "${!var}" ]]; then
+  for var in MM_TOKEN MM_TEAM_ID MM_BOT_USER_ID MM_BOT_TOKEN MM_BOT_CHANNEL_ID MM_TOWNSQUARE_CHANNEL_ID MM_AICHAT_CHANNEL_ID; do
+    if [[ -n "${!var:-}" ]]; then
       log "    ${var/MM_/MATTERMOST_} ✓"
     else
       warn "    ${var/MM_/MATTERMOST_} (empty)"
