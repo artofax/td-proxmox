@@ -431,7 +431,7 @@ if (( ! DRY_RUN )); then
       NEW_CFG=$(echo "$CFG_RESP" | python3 -c "
 import sys, json
 c = json.load(sys.stdin)
-# Six settings to flip:
+# Nine settings to flip:
 #  1. EnableUserAccessTokens — required to mint admin PAT for Homepage
 #     widget AND the bot's PAT.
 #  2. EnableBotAccountCreation — defaults to FALSE in Mattermost. Without
@@ -455,12 +455,27 @@ c = json.load(sys.stdin)
 #  6. WebsocketURL — clear so client derives from the request URL.
 #     A hardcoded value here would override the page's WS URL and
 #     re-introduce the Host mismatch.
+#  7. AllowedUntrustedInternalConnections — THE undocumented webhook
+#     gate. Mattermost's anti-SSRF protection blocks all outgoing
+#     connections (outgoing webhooks, mattermost-ai plugin, etc.) to
+#     RFC1918 / loopback / link-local addresses unless their host or
+#     CIDR is in this whitelist. With it empty (default), 'outgoing
+#     webhook → http://n8n:5678/...' silently fails. We whitelist
+#     every private range + Tailscale CGNAT + loopback + service
+#     hostnames so every in-stack target works. (Found by user
+#     2026-06-28 via config diff across CT 112/115/121.)
+#  8. EnablePostUsernameOverride / EnablePostIconOverride — let
+#     incoming webhooks and bot accounts post AS custom identities.
+#     Without these, webhook posts appear as the owning account name.
 ss = c.setdefault('ServiceSettings', {})
-ss['EnableUserAccessTokens']   = True
-ss['EnableBotAccountCreation'] = True
-ss['SiteURL']                  = ''
-ss['AllowCorsFrom']            = '*'
-ss['WebsocketURL']             = ''
+ss['EnableUserAccessTokens']     = True
+ss['EnableBotAccountCreation']   = True
+ss['SiteURL']                    = ''
+ss['AllowCorsFrom']              = '*'
+ss['WebsocketURL']               = ''
+ss['AllowedUntrustedInternalConnections'] = 'localhost 127.0.0.1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 n8n ollama-pi-agent gitea openwebui homepage sandbox mattermost'
+ss['EnablePostUsernameOverride'] = True
+ss['EnablePostIconOverride']     = True
 c.setdefault('EmailSettings', {})['RequireEmailVerification'] = False
 print(json.dumps(c))
 " 2>/dev/null || true)
