@@ -120,16 +120,41 @@ if (( UNINSTALL )); then
 fi
 
 # ----- pre-flight: storage exists, has 'backup' content -------------------
+# NOTE: there is no `pvesm config <name>` subcommand on PVE 8/9 — the
+# supported way to ask "does this storage support content type X?" is
+# `pvesm status --content backup`, which only lists storages that include
+# 'backup' in their content types. Fall back to reading /etc/pve/storage.cfg
+# directly if pvesm status doesn't accept --content for any reason.
 if (( ! DRY_RUN )); then
   if ! pvesm status 2>/dev/null | awk -v s="$STORAGE" 'NR>1 && $1==s {found=1} END {exit !found}'; then
-    warn "Storage '$STORAGE' isn't registered yet. Run setup-pve-etc-backup.sh's"
-    warn "USB walkthrough first, or pass --storage <existing-name>."
+    warn "Storage '$STORAGE' isn't registered yet. Run setup-usb-backup.sh"
+    warn "first (or setup-pve-etc-backup.sh's USB walkthrough), or pass"
+    warn "--storage <existing-name>."
     die "Aborting before writing job config."
   fi
-  if ! pvesm config "$STORAGE" 2>/dev/null | grep -qE '^[[:space:]]*content[[:space:]].*backup'; then
-    warn "Storage '$STORAGE' exists but doesn't include 'backup' in its content types."
-    warn "Fix:  pvesm set $STORAGE --content backup,iso,vztmpl"
-    die "Aborting before writing job config."
+
+  # Primary check: pvesm status --content backup lists only storages that
+  # advertise backup. If our storage shows up there, we're good.
+  if pvesm status --content backup 2>/dev/null \
+       | awk -v s="$STORAGE" 'NR>1 && $1==s {found=1} END {exit !found}'; then
+    : # storage supports backup — proceed
+  else
+    # Fallback: read /etc/pve/storage.cfg directly — handles the case where
+    # pvesm status --content isn't behaving as expected.
+    content_line=$(awk -v s="$STORAGE" '
+      $0 ~ "^dir: " s "$" || $0 ~ "^[a-z]+: " s "$" { in_block = 1; next }
+      in_block && /^[a-z]+:/ { in_block = 0 }
+      in_block && /^[[:space:]]*content[[:space:]]/ { print; exit }
+    ' /etc/pve/storage.cfg 2>/dev/null)
+
+    if echo "$content_line" | grep -q backup; then
+      : # found in storage.cfg
+    else
+      warn "Storage '$STORAGE' exists but doesn't include 'backup' in its content types."
+      warn "Current content:  ${content_line:-<not found>}"
+      warn "Fix:  pvesm set $STORAGE --content backup,iso,snippets"
+      die "Aborting before writing job config."
+    fi
   fi
 fi
 
