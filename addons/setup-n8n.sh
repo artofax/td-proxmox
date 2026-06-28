@@ -295,13 +295,25 @@ else
   pct exec "$CTID" -- mkdir -p /root/.ssh
   pct push "$CTID" /root/.ssh/authorized_keys /root/.ssh/authorized_keys --perms 0600
 
-  # Join Tailscale (idempotent --reset)
+  # Join Tailscale (idempotent --reset).
+  # Note: previous version swallowed install errors with >/dev/null 2>&1
+  # and ended up with CTs that never joined the tailnet but reported
+  # "success" — caught 2026-06-28 when n8n CT had no tailscale binary
+  # at all. Now we surface install errors and verify the binary exists
+  # before attempting 'up'.
   if [[ -n "$TS_AUTHKEY" ]]; then
-    log "Joining Tailscale..."
+    log "Installing Tailscale + joining tailnet..."
     pct exec "$CTID" -- bash -lc "
-      command -v tailscale >/dev/null 2>&1 || curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
+      set -e
+      if ! command -v tailscale >/dev/null 2>&1; then
+        echo '  installing tailscale...'
+        curl -fsSL https://tailscale.com/install.sh | sh 2>&1 | tail -5
+      fi
+      command -v tailscale >/dev/null 2>&1 || { echo '  TAILSCALE INSTALL FAILED — n8n will be LAN-only'; exit 1; }
+      echo '  tailscale up --hostname=$N8N_HOSTNAME...'
       tailscale up --authkey='$TS_AUTHKEY' --hostname='$N8N_HOSTNAME' --reset --accept-routes 2>&1 | tail -3
-    "
+      echo '  tailscale ip:' \$(tailscale ip -4 2>/dev/null || echo none)
+    " || warn "  Tailscale step failed — n8n will only be reachable via LAN IP $(pct exec "$CTID" -- hostname -I | awk '{print $1}'). Outgoing calls will need /etc/hosts entries or LAN DNS to reach 'mattermost' / 'gitea' / etc."
   fi
 fi
 
