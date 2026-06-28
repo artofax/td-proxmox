@@ -108,6 +108,7 @@ SMTP_FROM="$(read_token SMTP_FROM)"
 # ----- collect alerts ----------------------------------------------------
 declare -a alerts=()
 declare -a alert_keys=()
+declare -a healthy=()   # check_name → "current state" string for "all good" section
 
 add_alert() {
   local key="$1" msg="$2"
@@ -115,30 +116,47 @@ add_alert() {
   alerts+=("$msg")
 }
 
+# add_healthy: called for each check that PASSED. Lets the email show
+# "we checked these and they were fine: ..." instead of looking like
+# only one thing was inspected.
+add_healthy() {
+  local label="$1" value="$2"
+  healthy+=("$label: $value")
+}
+
 # DISK_FREE — root partition
 DISK_FREE_PCT="$(df / --output=pcent | tail -1 | tr -d '%' | tr -d ' ')"
 DISK_FREE_FREE=$((100 - DISK_FREE_PCT))
 if (( DISK_FREE_FREE < DISK_FREE_THRESHOLD_PCT )); then
   add_alert "DISK_FREE" "/ is $DISK_FREE_FREE% free (below $DISK_FREE_THRESHOLD_PCT% threshold). Used: $(df -h / --output=used,size | tail -1 | xargs)."
+else
+  add_healthy "Disk /" "$DISK_FREE_FREE% free ($(df -h / --output=avail | tail -1 | xargs) available; threshold ${DISK_FREE_THRESHOLD_PCT}%)"
 fi
 
 # LVM_THIN_FULL — biggest thin pool
 LVM_THIN_USED="$(lvs --noheadings --units g 2>/dev/null | awk '/twi-aotz/ {gsub("[^0-9.]","",$5); print $5}' | sort -nr | head -1)"
 if [[ -n "$LVM_THIN_USED" ]] && awk "BEGIN {exit !($LVM_THIN_USED > $LVM_THIN_THRESHOLD_PCT)}"; then
   add_alert "LVM_THIN_FULL" "LVM thin pool is $LVM_THIN_USED% used (above $LVM_THIN_THRESHOLD_PCT% threshold). vzdump and CT snapshots will start failing soon."
+elif [[ -n "$LVM_THIN_USED" ]]; then
+  add_healthy "LVM thin pool" "$LVM_THIN_USED% used (threshold ${LVM_THIN_THRESHOLD_PCT}%)"
 fi
 
 # RAM_FREE — current usage
 RAM_AVAIL_PCT="$(free | awk '/^Mem:/ {printf("%d\n", $7/$2*100)}')"
+RAM_DETAIL="$(free -h | awk '/^Mem:/ {print "total="$2", available="$7}')"
 if (( RAM_AVAIL_PCT < RAM_FREE_THRESHOLD_PCT )); then
-  RAM_DETAIL="$(free -h | awk '/^Mem:/ {print "total="$2", available="$7}')"
   add_alert "RAM_FREE" "Only $RAM_AVAIL_PCT% RAM available (below $RAM_FREE_THRESHOLD_PCT% threshold). $RAM_DETAIL"
+else
+  add_healthy "RAM" "${RAM_AVAIL_PCT}% available ($RAM_DETAIL; threshold ${RAM_FREE_THRESHOLD_PCT}%)"
 fi
 
 # CT_DOWN — any CT in 'stopped' state
 STOPPED_CTS="$(pct list 2>/dev/null | awk 'NR>1 && $2=="stopped" {print $1":"$3}')"
+RUNNING_CT_COUNT="$(pct list 2>/dev/null | awk 'NR>1 && $2=="running"' | wc -l)"
 if [[ -n "$STOPPED_CTS" ]]; then
   add_alert "CT_DOWN" "One or more LXC containers stopped: $(echo "$STOPPED_CTS" | tr '\n' ' ')"
+else
+  add_healthy "Containers" "$RUNNING_CT_COUNT running, 0 stopped"
 fi
 
 # VZDUMP_STALE — newest backup file in /var/lib/vz/dump/ or any storage with vzdump retention
@@ -155,10 +173,13 @@ done
 if [[ -n "$VZDUMP_NEWEST_HOURS" ]] && (( VZDUMP_NEWEST_HOURS > VZDUMP_STALE_HOURS )); then
   add_alert "VZDUMP_STALE" "Newest vzdump backup is $VZDUMP_NEWEST_HOURS hours old (>$VZDUMP_STALE_HOURS h threshold). Check /etc/pve/jobs.cfg and 'journalctl -u pve-daily-update.service'."
 elif [[ -z "$VZDUMP_NEWEST_HOURS" ]]; then
-  add_alert "VZDUMP_STALE" "No vzdump backup files found in any standard location. Backup may not be configured. Check /etc/pve/jobs.cfg."
+  add_alert "VZDUMP_STALE" "No vzdump backup files found in any standard location (/var/lib/vz/dump, /mnt/pve/*/dump, /var/backups). Backup may not be configured. Check 'cat /etc/pve/jobs.cfg'. If empty, run ./addons/setup-vzdump-schedule.sh to set up nightly CT backups."
+else
+  add_healthy "vzdump" "newest backup is ${VZDUMP_NEWEST_HOURS}h old (threshold ${VZDUMP_STALE_HOURS}h)"
 fi
 
 # SERVICE_INACTIVE — for each CT running a tracked service, check systemctl
+declare -a healthy_services=()
 for svc_pair in "mattermost:mattermost" "gitea:gitea" "n8n:n8n" "openwebui:open-webui" "homepage:homepage"; do
   hostname="${svc_pair%:*}"; service="${svc_pair#*:}"
   ctid=$(pct list 2>/dev/null | awk -v h="$hostname" '$3==h {print $1}' | head -1)
@@ -168,8 +189,13 @@ for svc_pair in "mattermost:mattermost" "gitea:gitea" "n8n:n8n" "openwebui:open-
   is_active=$(pct exec "$ctid" -- systemctl is-active "$service" 2>/dev/null || echo unknown)
   if [[ "$is_active" != "active" && "$is_active" != "unknown" ]]; then
     add_alert "SERVICE_${hostname^^}" "Service '$service' inside CT $ctid ($hostname) is $is_active. Check 'pct exec $ctid -- systemctl status $service'."
+  elif [[ "$is_active" == "active" ]]; then
+    healthy_services+=("$hostname")
   fi
 done
+if [[ ${#healthy_services[@]} -gt 0 ]]; then
+  add_healthy "Services" "$(IFS=, ; echo "${healthy_services[*]}") (all active)"
+fi
 
 # TS_KEY_EXPIRING — only if TS_AUTHKEY is in tokens AND has a tskey- format we can parse
 # Tailscale auth keys don't embed expiry in the key itself, so we read TS_KEY_EXPIRES (ISO date)
@@ -223,7 +249,11 @@ fi
 hostname_full=$(hostname -f 2>/dev/null || hostname)
 SUBJECT="[td-health] ${#new_alerts[@]} new alert(s) on $hostname_full"
 
-BODY="Health-watchdog detected the following new alerts on $hostname_full at $(date):
+BODY="Health-watchdog detected ${#new_alerts[@]} new alert(s) on $hostname_full at $(date).
+
+══════════════════════════════════════════════════════════════
+NEW ALERTS (action needed)
+══════════════════════════════════════════════════════════════
 
 "
 for i in "${new_alerts[@]}"; do
@@ -234,22 +264,46 @@ done
 
 if [[ ${#alert_keys[@]} -gt ${#new_alerts[@]} ]]; then
   BODY+="
-Plus ${#alert_keys[@]} - ${#new_alerts[@]} = $((${#alert_keys[@]} - ${#new_alerts[@]})) ongoing alerts from previous runs (not re-sent).
+($((${#alert_keys[@]} - ${#new_alerts[@]})) ongoing alerts from previous runs are NOT re-sent — see state file for the full firing list.)
+
 "
+fi
+
+BODY+="══════════════════════════════════════════════════════════════
+CHECKS THAT PASSED (no action needed)
+══════════════════════════════════════════════════════════════
+
+"
+if [[ ${#healthy[@]} -eq 0 ]]; then
+  BODY+="(none — everything below threshold not yet implemented in this check)
+"
+else
+  for h in "${healthy[@]}"; do
+    BODY+="• ✓ $h
+"
+  done
 fi
 
 BODY+="
 
-Diagnostics:
+══════════════════════════════════════════════════════════════
+DIAGNOSTICS (run on PVE host)
+══════════════════════════════════════════════════════════════
+
   pct list                  — see CT status
-  df -h /                   — disk usage
+  df -h /                   — disk usage on root
   free -h                   — RAM
   lvs                       — LVM thin pool usage
-  journalctl -u <service>   — service logs inside a CT (via pct exec)
+  cat /etc/pve/jobs.cfg     — backup jobs configured
+  mailq                     — postfix queue
+  systemctl list-timers     — scheduled jobs (incl. td-health-watchdog)
 
-State file: $STATE_FILE
-Run manually: /usr/local/bin/td-health-check
-Disable: systemctl disable --now td-health-watchdog.timer
+This check ran:
+  Script:     /usr/local/bin/td-health-check
+  State:      $STATE_FILE
+  Run manual: /usr/local/bin/td-health-check
+  Next auto:  $(systemctl list-timers --no-pager 2>/dev/null | awk '/td-health/{print $1, $2}' | head -1)
+  Disable:    systemctl disable --now td-health-watchdog.timer
 "
 
 # Send via the configured relay (postfix → Postmark/etc)
