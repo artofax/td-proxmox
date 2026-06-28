@@ -6,5 +6,7 @@
 /*
 !.gitignore
 !README.md
+!TROUBLESHOOTING_LOG.md
+!bootstrap-fresh-pve.sh
 !automation/
 !addons/
