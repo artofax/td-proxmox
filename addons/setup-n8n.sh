@@ -174,6 +174,7 @@ CT_PASSWORD="$(read_token CT_PASSWORD || true)"
 MM_BOT_TOKEN="$(read_token MATTERMOST_BOT_TOKEN || true)"
 MM_TOWNSQUARE_CHANNEL_ID="$(read_token MATTERMOST_TOWNSQUARE_CHANNEL_ID || true)"
 MM_AICHAT_CHANNEL_ID="$(read_token MATTERMOST_AICHAT_CHANNEL_ID || true)"
+MM_BOT_CHANNEL_ID="$(read_token MATTERMOST_BOT_CHANNEL_ID || true)"
 MM_TEAM_ID="$(read_token MATTERMOST_TEAM_ID || true)"
 MM_URL="$(read_token MATTERMOST_URL || true)"
 [[ -z "$MM_URL" ]] && MM_URL="http://mattermost:8065"
@@ -229,6 +230,16 @@ except: pass'
     else
       log "    ai-chat not found — workflows will use town-square instead"
       MM_AICHAT_CHANNEL_ID="$MM_TOWNSQUARE_CHANNEL_ID"
+    fi
+  fi
+  if [[ -z "$MM_BOT_CHANNEL_ID" ]]; then
+    log "  Resolving #bot channel ID via MM API..."
+    MM_BOT_CHANNEL_ID="$(_mm_pick_channel_id "http://localhost:8065/api/v4/teams/$MM_TEAM_ID/channels/name/bot")"
+    if [[ -n "$MM_BOT_CHANNEL_ID" ]]; then
+      log "    bot = $MM_BOT_CHANNEL_ID"
+    else
+      log "    bot not found — workflows targeting #bot will fall back to town-square"
+      MM_BOT_CHANNEL_ID="$MM_TOWNSQUARE_CHANNEL_ID"
     fi
   fi
 fi
@@ -702,22 +713,49 @@ else
       WF_BODY="$(WF_PATH="$wf" \
         TOWNSQUARE_ID="${MM_TOWNSQUARE_CHANNEL_ID:-}" \
         AICHAT_ID="${MM_AICHAT_CHANNEL_ID:-}" \
+        BOT_ID="${MM_BOT_CHANNEL_ID:-}" \
         python3 -c '
-import json, os
+import json, os, re
 with open(os.environ["WF_PATH"]) as f:
     w = json.load(f)
 
-# Patch channel IDs in any Mattermost node.
+# Patch channel IDs in any Mattermost node. Two cases:
+#   1. Static: p["channelId"] is the slug or "=slug" (n8n-expression-prefixed)
+#   2. Dynamic: p["channelId"] is "={{$json.channel}}" — set by a Code node
+#      upstream. In that case, also patch the Code node where the slug is
+#      assigned, so the dynamic value becomes the real UUID at runtime.
 ts = os.environ.get("TOWNSQUARE_ID", "")
 ai = os.environ.get("AICHAT_ID", "")
+bot = os.environ.get("BOT_ID", "")
+mapping = {"town-square": ts, "ai-chat": ai, "bot": bot}
+
 for node in w.get("nodes", []):
     if node.get("type") == "n8n-nodes-base.mattermost":
         p = node.setdefault("parameters", {})
         ch = p.get("channelId", "")
-        if ch == "town-square" and ts:
-            p["channelId"] = ts
-        elif ch == "ai-chat" and ai:
-            p["channelId"] = ai
+        # Strip leading "=" used by n8n for expressions when comparing slug
+        ch_bare = ch[1:] if ch.startswith("=") and not ch.startswith("={{") else ch
+        if ch_bare in mapping and mapping[ch_bare]:
+            p["channelId"] = mapping[ch_bare]
+
+    # For Code nodes that set channel = "slug" dynamically, replace the
+    # slug literal with the UUID literal. Match patterns like:
+    #   let channel = "bot";   ->   let channel = "uuid...";
+    # We do this conservatively: only replace inside lines that look like
+    # channel = "<slug>" so we do not clobber unrelated string literals.
+    if node.get("type") == "n8n-nodes-base.code":
+        p = node.setdefault("parameters", {})
+        code = p.get("jsCode", "")
+        if code:
+            for slug, uuid in mapping.items():
+                if not uuid:
+                    continue
+                code = re.sub(
+                    r"(channel\s*=\s*)([\x27\x22])" + re.escape(slug) + r"\2",
+                    lambda m, u=uuid: m.group(1) + m.group(2) + u + m.group(2),
+                    code,
+                )
+            p["jsCode"] = code
 
 # Strip metadata the public API rejects
 for k in ("id", "createdAt", "updatedAt", "versionId", "shared", "meta", "tags"):
