@@ -159,21 +159,53 @@ else
   add_healthy "Containers" "$RUNNING_CT_COUNT running, 0 stopped"
 fi
 
-# VZDUMP_STALE — newest backup file in /var/lib/vz/dump/ or any storage with vzdump retention
+# VZDUMP_STALE — newest backup file across every PVE storage configured with
+# 'backup' content. We discover paths from /etc/pve/storage.cfg rather than
+# hard-coding /mnt/pve/* — that pattern misses anything named outside the
+# /mnt/pve/<name> convention (e.g. our setup-usb-backup.sh writes to
+# /mnt/pve-backup). Plus /var/lib/vz/dump as a legacy fallback.
 VZDUMP_NEWEST_HOURS=""
-for dir in /var/lib/vz/dump /mnt/pve/*/dump /etc/pve/local /var/backups; do
+declare -a VZDUMP_DIRS=("/var/lib/vz/dump")
+VZDUMP_STORAGES=""
+
+# Read every dir-type storage from storage.cfg that has 'backup' in its
+# content list. awk reads stanzas: a 'dir: <name>' header starts a block,
+# any other top-level key ends it. Inside the block we capture path + content.
+while IFS=$'\t' read -r sname spath scontent; do
+  [[ -z "$sname" || -z "$spath" ]] && continue
+  if echo "$scontent" | grep -q '\bbackup\b'; then
+    VZDUMP_DIRS+=("$spath/dump")
+    VZDUMP_STORAGES+="$sname($spath/dump) "
+  fi
+done < <(awk '
+  # Stanza-header boundary: any "<type>: <name>" at column 0 closes the
+  # previous stanza and (if it is a dir:) opens a new one. We MUST emit
+  # before resetting, otherwise back-to-back dir stanzas lose the first.
+  /^[a-z]+:[[:space:]]/ {
+    if (sname && spath) print sname "\t" spath "\t" scontent
+    sname = ""; spath = ""; scontent = ""; in_block = 0
+    if ($0 ~ /^dir: /) { sname = $2; in_block = 1 }
+    next
+  }
+  in_block && /^[[:space:]]+path[[:space:]]/    { spath = $2 }
+  in_block && /^[[:space:]]+content[[:space:]]/ { scontent = $2 }
+  END { if (sname && spath) print sname "\t" spath "\t" scontent }
+' /etc/pve/storage.cfg 2>/dev/null)
+
+for dir in "${VZDUMP_DIRS[@]}"; do
   [[ -d "$dir" ]] || continue
-  newest_age=$(find "$dir" -name "vzdump-*.tar*" -o -name "vzdump-*.vma*" 2>/dev/null | xargs -I{} stat -c '%Y' {} 2>/dev/null | sort -nr | head -1)
+  newest_age=$(find "$dir" -maxdepth 2 \( -name "vzdump-*.tar*" -o -name "vzdump-*.vma*" \) 2>/dev/null | xargs -I{} stat -c '%Y' {} 2>/dev/null | sort -nr | head -1)
   if [[ -n "$newest_age" ]]; then
     hrs=$(( ($(date +%s) - newest_age) / 3600 ))
     [[ -z "$VZDUMP_NEWEST_HOURS" ]] && VZDUMP_NEWEST_HOURS=$hrs
     (( hrs < VZDUMP_NEWEST_HOURS )) && VZDUMP_NEWEST_HOURS=$hrs
   fi
 done
+
 if [[ -n "$VZDUMP_NEWEST_HOURS" ]] && (( VZDUMP_NEWEST_HOURS > VZDUMP_STALE_HOURS )); then
-  add_alert "VZDUMP_STALE" "Newest vzdump backup is $VZDUMP_NEWEST_HOURS hours old (>$VZDUMP_STALE_HOURS h threshold). Check /etc/pve/jobs.cfg and 'journalctl -u pve-daily-update.service'."
+  add_alert "VZDUMP_STALE" "Newest vzdump backup is $VZDUMP_NEWEST_HOURS hours old (>$VZDUMP_STALE_HOURS h threshold). Searched: ${VZDUMP_DIRS[*]}. Check /etc/pve/jobs.cfg and 'journalctl -u pve-daily-update.service'."
 elif [[ -z "$VZDUMP_NEWEST_HOURS" ]]; then
-  add_alert "VZDUMP_STALE" "No vzdump backup files found in any standard location (/var/lib/vz/dump, /mnt/pve/*/dump, /var/backups). Backup may not be configured. Check 'cat /etc/pve/jobs.cfg'. If empty, run ./addons/setup-vzdump-schedule.sh to set up nightly CT backups."
+  add_alert "VZDUMP_STALE" "No vzdump backup files found. Searched: ${VZDUMP_DIRS[*]} (storages with content=backup: ${VZDUMP_STORAGES:-none}). If empty, run ./addons/setup-vzdump-schedule.sh."
 else
   add_healthy "vzdump" "newest backup is ${VZDUMP_NEWEST_HOURS}h old (threshold ${VZDUMP_STALE_HOURS}h)"
 fi
