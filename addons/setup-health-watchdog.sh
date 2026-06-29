@@ -66,7 +66,9 @@ run()  { if (( DRY_RUN )); then printf "[dry-run] %s\n" "$*"; else eval "$@"; fi
 if (( UNINSTALL )); then
   log "Uninstalling health watchdog..."
   run "systemctl disable --now ${TIMER_NAME}.timer 2>/dev/null || true"
+  run "systemctl disable --now td-health-heartbeat.timer 2>/dev/null || true"
   run "rm -f /etc/systemd/system/${TIMER_NAME}.timer /etc/systemd/system/${TIMER_NAME}.service"
+  run "rm -f /etc/systemd/system/td-health-heartbeat.timer /etc/systemd/system/td-health-heartbeat.service"
   run "rm -f $CHECK_SCRIPT"
   run "systemctl daemon-reload"
   log "Uninstalled. State file at $STATE_DIR preserved — delete manually if you want it gone."
@@ -80,8 +82,24 @@ cat > /tmp/td-health-check.sh <<'CHECK_EOF'
 #!/usr/bin/env bash
 # td-health-check — runs by systemd timer (or cron); emails on threshold breach.
 # Installed + managed by setup-health-watchdog.sh.
+#
+# Flags:
+#   (no flags)    Hourly mode: posts to Mattermost webhook + emails NEW alerts only
+#   --heartbeat   Heartbeat mode: posts to Mattermost regardless (sets mode=heartbeat
+#                 in the webhook payload). Called daily by td-health-heartbeat.timer
+#                 so the Mattermost channel gets a "still alive, here's status" ping
+#                 even when nothing's broken.
 
 set -Eeuo pipefail
+
+HEARTBEAT_MODE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --heartbeat) HEARTBEAT_MODE=1; shift ;;
+    *) shift ;;
+  esac
+done
+export HEARTBEAT_MODE
 
 TOKENS_FILE="${TOKENS_FILE:-/root/td-tokens.txt}"
 STATE_DIR="/var/lib/td-health"
@@ -268,12 +286,92 @@ for i in "${!alert_keys[@]}"; do
   fi
 done
 
+# Determine cleared alerts (in prev_alerts but not in alert_keys)
+# These are alerts that were firing last run and have now resolved themselves.
+# We want to celebrate these in Mattermost so the on-call knows the issue cleared.
+declare -a cleared_alerts=()
+while IFS= read -r prev_key; do
+  [[ -z "$prev_key" ]] && continue
+  found=0
+  for k in "${alert_keys[@]}"; do
+    [[ "$k" == "$prev_key" ]] && { found=1; break; }
+  done
+  (( ! found )) && cleared_alerts+=("$prev_key")
+done < <(echo "$prev_alerts" | python3 -c '
+import sys, json
+try:
+    for k in json.load(sys.stdin):
+        print(k)
+except Exception:
+    pass
+' 2>/dev/null)
+
 # Write current state
 echo "$new_state" > "$STATE_FILE"
 
-# If no new alerts, exit silently (don't spam every hour with the same issues)
+# ----- Mattermost webhook (always sent; workflow decides whether to post) --
+# We POST to n8n on every run regardless of state-change so the workflow
+# has full context: new alerts, cleared alerts, current healthy checks, and
+# a heartbeat flag. The workflow's Code node classifies and skips if there's
+# nothing to say.
+MATTERMOST_WEBHOOK_URL="$(read_token MATTERMOST_WEBHOOK_URL || true)"
+HEARTBEAT_MODE="${HEARTBEAT_MODE:-0}"
+
+if [[ -n "$MATTERMOST_WEBHOOK_URL" ]]; then
+  hostname_full=$(hostname -f 2>/dev/null || hostname)
+
+  # Build the payload using python so JSON escaping is bulletproof —
+  # alert messages contain newlines, quotes, paths, etc. that would break
+  # naive shell quoting. We pass arrays through temp files because they
+  # may contain whitespace, multi-word strings, etc.
+  printf '%s\n' "${alert_keys[@]:-}" > /tmp/health-keys.$$
+  printf '%s\n' "${alerts[@]:-}"     > /tmp/health-msgs.$$
+  printf '%s\n' "${new_alerts[@]:-}" > /tmp/health-newidx.$$
+  printf '%s\n' "${cleared_alerts[@]:-}" > /tmp/health-cleared.$$
+  printf '%s\n' "${healthy[@]:-}"    > /tmp/health-passing.$$
+
+  webhook_payload=$(python3 <<PYEOF
+import json, os
+def lines(path):
+    if not os.path.exists(path): return []
+    with open(path) as f:
+        return [l.rstrip('\n') for l in f if l.strip()]
+keys = lines("/tmp/health-keys.$$")
+msgs = lines("/tmp/health-msgs.$$")
+new_indices = [int(x) for x in lines("/tmp/health-newidx.$$") if x.isdigit()]
+cleared = lines("/tmp/health-cleared.$$")
+passing = lines("/tmp/health-passing.$$")
+new_alerts = [{"key": keys[i] if i < len(keys) else "?", "message": msgs[i] if i < len(msgs) else "?"} for i in new_indices]
+payload = {
+    "host": "$hostname_full",
+    "timestamp": "$(date -Iseconds)",
+    "mode": "heartbeat" if "$HEARTBEAT_MODE" == "1" else "incremental",
+    "new_alerts": new_alerts,
+    "cleared_alerts": cleared,
+    "active_alerts": keys,
+    "healthy_checks": passing,
+    "active_count": len(keys),
+    "new_count": len(new_alerts),
+    "cleared_count": len(cleared),
+}
+print(json.dumps(payload))
+PYEOF
+)
+  rm -f /tmp/health-keys.$$ /tmp/health-msgs.$$ /tmp/health-newidx.$$ \
+        /tmp/health-cleared.$$ /tmp/health-passing.$$
+
+  # POST with short timeout — we don't want a flaky n8n to delay the email path
+  curl -sS --max-time 5 -X POST "$MATTERMOST_WEBHOOK_URL" \
+    -H "Content-Type: application/json" \
+    -d "$webhook_payload" >/dev/null 2>&1 \
+    && echo "$(date +%F\ %T) health-check: posted to Mattermost webhook." \
+    || echo "$(date +%F\ %T) health-check: Mattermost webhook POST failed (non-fatal)."
+fi
+
+# If no new alerts, exit silently for EMAIL path (don't spam every hour with
+# the same issues). Mattermost path above already posted on every run.
 if [[ ${#new_alerts[@]} -eq 0 ]]; then
-  echo "$(date +%F\ %T) health-check: ${#alert_keys[@]} active alert(s), 0 new — silent."
+  echo "$(date +%F\ %T) health-check: ${#alert_keys[@]} active alert(s), 0 new — email silent."
   exit 0
 fi
 
@@ -384,8 +482,35 @@ Type=oneshot
 ExecStart=$CHECK_SCRIPT
 EOF
 
+  # Daily 9am heartbeat — posts to Mattermost regardless of state, so the
+  # channel shows a green "still healthy" message even on quiet days. This
+  # is what makes the Mattermost feed trustworthy: silence becomes a signal
+  # (watchdog is dead) instead of ambiguous (could be healthy, could be dead).
+  cat > /etc/systemd/system/td-health-heartbeat.timer <<EOF
+[Unit]
+Description=TD-Proxmox health watchdog daily heartbeat (Mattermost)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  cat > /etc/systemd/system/td-health-heartbeat.service <<EOF
+[Unit]
+Description=TD-Proxmox health watchdog heartbeat check
+After=postfix.service
+
+[Service]
+Type=oneshot
+ExecStart=$CHECK_SCRIPT --heartbeat
+EOF
+
   systemctl daemon-reload
   systemctl enable --now ${TIMER_NAME}.timer
+  systemctl enable --now td-health-heartbeat.timer
 fi
 
 # ----- run one check now so you see immediate output --------------------
@@ -398,10 +523,27 @@ fi
 log "================================================================"
 log "==> Health watchdog installed."
 log " "
-log "  Check script:  $CHECK_SCRIPT"
-log "  State file:    $STATE_FILE"
-log "  Cadence:       every 1 hour via systemd timer ($TIMER_NAME.timer)"
-log "  Alerts go to:  \$ADMIN_NOTIFY_EMAIL (currently: $(grep ^ADMIN_NOTIFY_EMAIL $TOKENS_FILE 2>/dev/null | cut -d= -f2))"
+log "  Check script:    $CHECK_SCRIPT"
+log "  State file:      $STATE_FILE"
+log "  Hourly cadence:  ${TIMER_NAME}.timer (every 60min, +/-2min jitter)"
+log "  Daily heartbeat: td-health-heartbeat.timer (09:00 local; Mattermost only)"
+log "  Email alerts:    \$ADMIN_NOTIFY_EMAIL (currently: $(grep ^ADMIN_NOTIFY_EMAIL $TOKENS_FILE 2>/dev/null | cut -d= -f2))"
+log " "
+
+MM_URL_PRESENT=$(grep -c '^MATTERMOST_WEBHOOK_URL=' "$TOKENS_FILE" 2>/dev/null || echo 0)
+if [[ "$MM_URL_PRESENT" -gt 0 ]]; then
+  log "Mattermost integration: ENABLED"
+  log "  Posts on every hourly run (silent when nothing changed)"
+  log "  Posts 'all green' heartbeat at 09:00 daily"
+  log "  Workflow: addons/n8n/workflows/td-health-to-mattermost.json"
+  log "  Activate that workflow in n8n if you haven't already."
+else
+  log "Mattermost integration: DISABLED (no MATTERMOST_WEBHOOK_URL token)"
+  log "  To enable: in n8n, import + activate"
+  log "  addons/n8n/workflows/td-health-to-mattermost.json,"
+  log "  copy its webhook URL, then add to $TOKENS_FILE:"
+  log "    MATTERMOST_WEBHOOK_URL=http://n8n:5678/webhook/td-health"
+fi
 log " "
 log "Thresholds (override in $TOKENS_FILE with HEALTH_<NAME>=<value>):"
 log "  HEALTH_DISK_FREE_THRESHOLD_PCT = $DEFAULT_DISK_FREE_THRESHOLD_PCT"
@@ -411,13 +553,17 @@ log "  HEALTH_VZDUMP_STALE_HOURS      = $DEFAULT_VZDUMP_STALE_HOURS"
 log "  HEALTH_TS_KEY_WARN_DAYS        = $DEFAULT_TS_KEY_WARN_DAYS"
 log " "
 log "Manage:"
-log "  Run on demand:  $CHECK_SCRIPT"
-log "  Timer status:   systemctl status ${TIMER_NAME}.timer"
-log "  Next fire:      systemctl list-timers ${TIMER_NAME}.timer"
-log "  Disable:        systemctl disable --now ${TIMER_NAME}.timer"
-log "  Uninstall:      $(basename "$0") --uninstall"
+log "  Run on demand:    $CHECK_SCRIPT"
+log "  Force heartbeat:  $CHECK_SCRIPT --heartbeat"
+log "  Timer status:     systemctl status ${TIMER_NAME}.timer td-health-heartbeat.timer"
+log "  Next fire:        systemctl list-timers ${TIMER_NAME}.timer td-health-heartbeat.timer"
+log "  Disable hourly:   systemctl disable --now ${TIMER_NAME}.timer"
+log "  Disable beat:     systemctl disable --now td-health-heartbeat.timer"
+log "  Uninstall:        $(basename "$0") --uninstall"
 log " "
 log "Dedupe: alerts only email when they FLIP from clear → firing."
 log "  An alert that's been firing for hours doesn't re-spam your inbox."
+log "  Mattermost path posts every hour but workflow Code node skips"
+log "  if there's nothing to say (no new alerts, no cleared, not heartbeat)."
 log "  Reset state to re-test: rm $STATE_FILE"
 log "================================================================"

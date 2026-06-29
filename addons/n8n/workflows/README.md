@@ -37,6 +37,7 @@ probably isn't well-integrated yet. Building the workflow surfaces the gaps.
 | `hello-mattermost.json` | Webhook `/hello` | Mattermost | Smoke test — POST to the webhook, message appears in `town-square`. Use as a starter pattern for any webhook→MM flow. |
 | `gitea-events-to-mattermost.json` | Gitea system webhook | Gitea → MM | Every push, PR, issue, release, etc. on any Gitea repo posts a formatted message in `#bot`. Per-event-type formatting; high-frequency events (e.g. push of small commits) are condensed. |
 | `postmark-events-to-mattermost.json` | Postmark webhook `/postmark-events` | Postmark → MM | Bounces, spam complaints, and subscription changes from Postmark land in `#bot`. Delivery/open/click events are silently dropped to avoid channel spam. |
+| `td-health-to-mattermost.json` | Watchdog webhook `/td-health` | PVE host watchdog → MM | The hourly `td-health-check` POSTs its full state to this webhook. The workflow classifies (new alert / cleared / heartbeat / silent) and only posts when there's something to say. Daily 09:00 heartbeat confirms the watchdog is alive — silence becomes a signal. |
 
 ### Digests (cron → summarize → send)
 
@@ -166,6 +167,7 @@ If you fork this library into a different stack, here's what you need to swap:
 | `gitea-events-to-mattermost` | Gitea CT + system webhook configured, Mattermost CT | `allowed_host_list` in Gitea's `webhook.*` config must include n8n's hostname |
 | `mm-ollama-chat` | Mattermost CT + outgoing webhook, Ollama CT (or pi-agent CT) | Channel ID hardcoded — patch via `setup-n8n.sh` channel resolver |
 | `postmark-events-to-mattermost` | n8n CT reachable from public internet (Cloudflare tunnel), Mattermost CT | Postmark account with webhook configured at your public URL |
+| `td-health-to-mattermost` | `setup-health-watchdog.sh` installed, Mattermost CT | `MATTERMOST_WEBHOOK_URL` in `/root/td-tokens.txt` — copy from this workflow's webhook node after activating |
 
 ---
 
@@ -205,9 +207,9 @@ the filename with `_` — `setup-n8n.sh` skips those.
 
 These don't exist yet but should as we land more integration:
 
-- **`pve-events-to-mattermost.json`** — PVE webhook for vzdump failure, watchdog
-  alert, CT state change → format → MM `#ops`. Pairs with `setup-pve-etc-backup`
-  and `setup-health-watchdog`.
+- **`vzdump-completed-to-mattermost.json`** — PVE vzdump completion event →
+  format → MM `#ops`. Pairs with `setup-vzdump-schedule`. The PVE
+  `notification-mode` setting can be wired to a webhook target instead of email.
 - **`mm-chat-to-summary-to-gitea.json`** — daily MM channel transcript →
   Ollama summarize → commit to a Gitea wiki page. Pairs with `setup-mattermost`.
 - **`filebrowser-upload-to-mattermost.json`** — file dropped in shared folder →
