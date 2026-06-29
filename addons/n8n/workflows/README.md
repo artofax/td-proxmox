@@ -45,6 +45,12 @@ probably isn't well-integrated yet. Building the workflow surfaces the gaps.
 |---|---|---|---|
 | `gitea-daily-digest.json` | Cron `0 9 * * *` | Gitea API → MM | Daily 9am summary of yesterday's activity across all Gitea repos (commits, opened/closed issues, opened/closed PRs). Posts to `town-square`. |
 
+### Mirror sync (Sobol Mirror — read SaaS → land in Postgres)
+
+| File | Trigger | Touches | What it does |
+|---|---|---|---|
+| `slack-mirror-sync.json` | Hourly cron `0 * * * *` | Slack API → Postgres mirror | First Sobol Mirror connector. Pulls conversations.list + users.list + conversations.history for every non-archived channel; upserts to `slack.*` tables in the `sobol_mirror` DB. Updates `_meta.sync_state` cursor. Consumed by `comms-agent` persona via `agent_view.slack_*` views. Requires `setup-postgres-mirror.sh` + `setup-connector-slack.sh` to be installed first. |
+
 ### Chat actions (MM command → action elsewhere → reply)
 
 | File | Trigger | Touches | What it does |
