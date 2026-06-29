@@ -96,6 +96,95 @@ ADMIN_NOTIFY_EMAIL set. `--test-only` lets you verify without re-config.
 
 ## Entries
 
+## 2026-06-28 19:45 CT — Health watchdog false-alerted VZDUMP_STALE despite working backups
+
+**Symptom:** After `setup-usb-backup.sh` registered `usb-backup` as a
+PVE storage at `/mnt/pve-backup` and `vzdump --all --storage usb-backup`
+successfully wrote backup files there, the hourly `td-health-watchdog`
+timer still emailed:
+
+> No vzdump backup files found in any standard location
+> (/var/lib/vz/dump, /mnt/pve/*/dump, /var/backups). Backup may not be
+> configured.
+
+`ls -la /mnt/pve-backup/dump/` showed seven fresh `vzdump-lxc-*.tar.zst`
+files. `pvesm status --content backup` showed `usb-backup` as `active`.
+Backups WERE working — the watchdog just couldn't see them.
+
+**Root cause:** The VZDUMP_STALE check hard-coded its search paths:
+
+```bash
+for dir in /var/lib/vz/dump /mnt/pve/*/dump /etc/pve/local /var/backups; do
+```
+
+That `/mnt/pve/*/dump` glob assumes the PVE convention of storage names
+mounted under `/mnt/pve/<storage-name>/`. But `setup-usb-backup.sh`
+mounts at `/mnt/pve-backup/` (no `/pve/` subdir) by design — a single
+mount path that's easier to remember and inspect. The glob never
+expanded to that location, the find returned empty, and the check
+falsely concluded no backups existed.
+
+**Companion bug along the way (commit `b9d8dc0`):** While diagnosing,
+discovered that `setup-vzdump-schedule.sh`'s preflight also relied on a
+non-existent command — `pvesm config <name>` — which silently returned
+no output, causing the preflight to falsely die with
+"storage doesn't include backup in content types" even though
+`/etc/pve/storage.cfg` showed `content backup,snippets,iso`. Replaced
+with `pvesm status --content backup` (which filters to backup-capable
+storages) plus a `/etc/pve/storage.cfg` parse as fallback.
+
+**Fix:** Replace the hard-coded path list with discovery from
+`/etc/pve/storage.cfg`. awk parses every `dir:` stanza, grabs the
+`path` and `content` fields, and any stanza whose content includes
+`backup` contributes `<path>/dump` to the search list. `/var/lib/vz/dump`
+stays in as a legacy fallback. Result: any future addon that registers
+a backup-content storage at any path is automatically picked up.
+
+**awk parser pitfall worth remembering:** First version of the parser
+had two separate header rules — one for `/^dir: /` and one for
+"next stanza header while in_block". When two `dir:` stanzas appeared
+back-to-back, the second rule never fired because the first rule
+matched and called `next` before it could emit the previous block.
+The fix was to merge into a single boundary rule that emits any
+pending block FIRST, then conditionally opens a new one if the boundary
+is a `dir:`. Test fixture for this:
+
+```
+dir: local
+        path /var/lib/vz
+        content backup,iso,vztmpl
+
+dir: usb-backup
+        path /mnt/pve-backup
+        content backup,snippets,iso
+```
+
+Should output BOTH lines. The buggy version only printed `usb-backup`.
+
+**Files / Commits:**
+- `repo/addons/setup-vzdump-schedule.sh` — preflight check rewritten
+  (commit `b9d8dc0`)
+- `repo/addons/setup-health-watchdog.sh` — VZDUMP_STALE path discovery
+  (commit `5570c7a`)
+- `repo/addons/setup-usb-backup.sh` — auto-install `parted` +
+  `e2fsprogs` (commit `e728eea`); was the original USB-prep addon
+  (commit `beaa4d2`)
+
+**Related architectural pattern:** Any time a script asks "where on
+disk are my backups / snippets / ISOs / templates?" — query PVE's
+storage config, don't assume the layout. The storage.cfg parsing
+snippet in `setup-health-watchdog.sh` is the reference implementation;
+copy it into any future addon that needs to discover storage paths.
+
+**Operator verification after fix:**
+```bash
+rm /var/lib/td-health/state.json
+/usr/local/bin/td-health-check
+# silent run = all 7 checks pass
+```
+
+---
+
 ## 2026-06-28 19:30 CT — Email layer added to foundations + TD-Proxmox + studio-stack
 
 **Symptom (preventative, not reactive):** PVE alerts (vzdump completion,
