@@ -289,17 +289,92 @@ upsert_token SOBOL_MIRROR_READONLY_USER "sobol_agent_readonly"
 upsert_token SOBOL_MIRROR_READONLY_PASSWORD "$SOBOL_READER_PASS"
 upsert_token SOBOL_MIRROR_CTID "$CTID"
 
-# ----- 6. Register n8n credentials (optional) --------------------------------
+# ----- 6. Register n8n credentials -------------------------------------------
 if (( ! SKIP_N8N_REGISTER )); then
   N8N_CTID="$(find_ct_by_hostname n8n 2>/dev/null || true)"
-  if [[ -n "$N8N_CTID" ]]; then
-    log "Registering Postgres credentials in n8n CT $N8N_CTID..."
-    log "  Credential name: 'Sobol Mirror (writer)'"
-    log "  Credential name: 'Sobol Mirror (read-only)'"
-    log "  (n8n public API credential creation handled by individual connector"
-    log "   setup scripts — this addon just emits the names connectors expect.)"
+  if [[ -z "$N8N_CTID" ]]; then
+    log "  n8n CT not found — skipping credential registration"
+    log "  Run this addon again after setup-n8n.sh, or manually create:"
+    log "    'Sobol Mirror (writer)' — type: postgres"
+    log "    'Sobol Mirror (read-only)' — type: postgres"
   else
-    log "  n8n CT not found — skipping credential registration (re-run after n8n exists)"
+    N8N_API_KEY="$(read_token N8N_API_KEY 2>/dev/null || true)"
+    if [[ -z "$N8N_API_KEY" ]]; then
+      # Try the td-tokens file as fallback (n8n stores its key there during setup-n8n)
+      N8N_API_KEY="$(awk -F= '/^N8N_API_KEY=/{val=$2} END{print val}' /root/td-tokens.txt 2>/dev/null | tr -d ' ' || true)"
+    fi
+
+    if [[ -z "$N8N_API_KEY" ]]; then
+      warn "  N8N_API_KEY not found in $TOKENS_FILE or /root/td-tokens.txt"
+      warn "  Skipping credential registration. To create later:"
+      warn "    Re-run with --tokens pointing at the file containing N8N_API_KEY"
+      warn "    OR create credentials manually in n8n UI (Settings → Credentials)"
+    else
+      log "Registering Postgres credentials in n8n CT $N8N_CTID..."
+
+      # Helper: create credential if not present (n8n public API)
+      create_pg_credential() {
+        local cred_name="$1" pg_user="$2" pg_pass="$3"
+        # Check if exists
+        local exists
+        exists="$(pct exec "$N8N_CTID" -- curl -sS -H "X-N8N-API-KEY: $N8N_API_KEY" \
+          http://localhost:5678/api/v1/credentials 2>/dev/null \
+          | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    items = d.get('data', d) if isinstance(d, dict) else d
+    for c in items:
+        if c.get('name') == '$cred_name':
+            print('exists'); break
+except: pass" 2>/dev/null)"
+
+        if [[ "$exists" == "exists" ]]; then
+          log "  ✓ Credential '$cred_name' already exists — skipping"
+          return 0
+        fi
+
+        local payload
+        payload="$(PG_HOST="$CT_HOSTNAME" PG_USER="$pg_user" PG_PASS="$pg_pass" CRED_NAME="$cred_name" python3 -c '
+import json, os
+print(json.dumps({
+  "name": os.environ["CRED_NAME"],
+  "type": "postgres",
+  "data": {
+    "host": os.environ["PG_HOST"],
+    "port": 5432,
+    "database": "sobol_mirror",
+    "user": os.environ["PG_USER"],
+    "password": os.environ["PG_PASS"],
+    "ssl": "disable"
+  }
+}))')"
+
+        # POST to /api/v1/credentials
+        local code
+        code="$(pct exec "$N8N_CTID" -- bash -lc "
+          echo '$payload' | curl -sS -o /tmp/cred-resp.json -w '%{http_code}' \
+            -H 'X-N8N-API-KEY: $N8N_API_KEY' \
+            -H 'Content-Type: application/json' \
+            -X POST --data-binary @- \
+            http://localhost:5678/api/v1/credentials
+        ")"
+        if [[ "$code" =~ ^2 ]]; then
+          log "  ✓ Created '$cred_name' (HTTP $code)"
+        else
+          warn "  Credential create returned HTTP $code for '$cred_name'"
+          pct exec "$N8N_CTID" -- cat /tmp/cred-resp.json 2>/dev/null | sed 's/^/    /' >&2 || true
+        fi
+        pct exec "$N8N_CTID" -- rm -f /tmp/cred-resp.json 2>/dev/null || true
+      }
+
+      if (( ! DRY_RUN )); then
+        create_pg_credential "Sobol Mirror (writer)"     "sobol_writer"         "$SOBOL_WRITER_PASS"
+        create_pg_credential "Sobol Mirror (read-only)"  "sobol_agent_readonly" "$SOBOL_READER_PASS"
+      else
+        log "[dry-run] would create credentials: 'Sobol Mirror (writer)' + 'Sobol Mirror (read-only)'"
+      fi
+    fi
   fi
 fi
 

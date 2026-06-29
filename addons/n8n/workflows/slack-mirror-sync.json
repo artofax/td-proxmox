@@ -51,19 +51,18 @@
             { "name": "limit", "value": "200" }
           ]
         },
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{$env.SLACK_BOT_TOKEN}}" }
-          ]
-        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
         "options": { "response": { "response": { "responseFormat": "json" } } }
       },
       "id": "ssssss04-1111-1111-1111-ssssssssssss",
       "name": "List channels",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1080, 200]
+      "position": [1080, 200],
+      "credentials": {
+        "httpHeaderAuth": { "name": "Slack (Sobol Sync) — Bearer" }
+      }
     },
     {
       "parameters": {
@@ -74,19 +73,18 @@
             { "name": "limit", "value": "200" }
           ]
         },
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{$env.SLACK_BOT_TOKEN}}" }
-          ]
-        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
         "options": { "response": { "response": { "responseFormat": "json" } } }
       },
       "id": "ssssss05-1111-1111-1111-ssssssssssss",
       "name": "List users",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1080, 400]
+      "position": [1080, 400],
+      "credentials": {
+        "httpHeaderAuth": { "name": "Slack (Sobol Sync) — Bearer" }
+      }
     },
     {
       "parameters": {
@@ -164,19 +162,18 @@
             { "name": "limit", "value": "200" }
           ]
         },
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{$env.SLACK_BOT_TOKEN}}" }
-          ]
-        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
         "options": { "response": { "response": { "responseFormat": "json" } } }
       },
       "id": "ssssss11-1111-1111-1111-ssssssssssss",
       "name": "Fetch channel history",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2200, 300]
+      "position": [2200, 300],
+      "credentials": {
+        "httpHeaderAuth": { "name": "Slack (Sobol Sync) — Bearer" }
+      }
     },
     {
       "parameters": {

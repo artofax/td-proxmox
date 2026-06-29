@@ -44,6 +44,7 @@ probably isn't well-integrated yet. Building the workflow surfaces the gaps.
 | File | Trigger | Touches | What it does |
 |---|---|---|---|
 | `gitea-daily-digest.json` | Cron `0 9 * * *` | Gitea API → MM | Daily 9am summary of yesterday's activity across all Gitea repos (commits, opened/closed issues, opened/closed PRs). Posts to `town-square`. |
+| `comms-agent-digest.json` | Cron `0 9 * * *` + Manual webhook | Postgres mirror → Ollama → MM | Daily 9am digest from the comms-agent persona. Reads `agent_view.slack_*` views, passes aggregated JSON to Ollama (default `qwen2.5:14b`), posts to MM (default `#bot`, configurable). Skips with explanatory message when sync is stale or zero messages. Logs every run to `_meta.agent_actions`. |
 
 ### Mirror sync (Sobol Mirror — read SaaS → land in Postgres)
 

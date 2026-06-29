@@ -198,15 +198,78 @@ SQL
   pct exec "$MIRROR_CTID" -- rm -f /tmp/manifest-slack.yaml
 fi
 
-# ----- n8n workflow import ---------------------------------------------------
-log "Importing n8n workflow (slack-mirror-sync)..."
-log "  NOTE: Workflow JSON ships imported by setup-n8n.sh via the workflows/ folder."
-log "  This addon just sets the credentials it needs:"
-log "    - Slack credential: 'Slack (Sobol Sync)' using $SOBOL_SLACK_BOT_TOKEN"
-log "    - Postgres credential: 'Sobol Mirror (writer)' using SOBOL_MIRROR_WRITER_PASSWORD"
-log "  Both should be created in n8n UI manually OR via a future setup-n8n-credentials.sh."
-log "  For tonight: import addons/n8n/workflows/slack-mirror-sync.json manually in n8n UI"
-log "  and bind it to two credentials before activating."
+# ----- n8n credential + workflow ---------------------------------------------
+log "Registering Slack credential in n8n..."
+N8N_CTID="$(find_ct_by_hostname n8n 2>/dev/null || true)"
+
+if [[ -z "$N8N_CTID" ]]; then
+  warn "  n8n CT not found — credential creation skipped"
+  warn "  Manually create in n8n UI:"
+  warn "    Settings → Credentials → New → HTTP Header Auth"
+  warn "    Name: 'Slack (Sobol Sync) — Bearer'"
+  warn "    Header: Authorization, Value: 'Bearer $SLACK_TOKEN'"
+else
+  N8N_API_KEY="$(read_token N8N_API_KEY 2>/dev/null || \
+    awk -F= '/^N8N_API_KEY=/{val=$2} END{print val}' /root/td-tokens.txt 2>/dev/null | tr -d ' ' || true)"
+
+  if [[ -z "$N8N_API_KEY" ]]; then
+    warn "  N8N_API_KEY not found — skipping credential creation"
+    warn "  Re-run with N8N_API_KEY in $TOKENS_FILE or /root/td-tokens.txt"
+  elif (( ! DRY_RUN )); then
+    CRED_NAME="Slack (Sobol Sync) — Bearer"
+    # Check if exists
+    EXISTS="$(pct exec "$N8N_CTID" -- curl -sS -H "X-N8N-API-KEY: $N8N_API_KEY" \
+      http://localhost:5678/api/v1/credentials 2>/dev/null \
+      | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    items = d.get('data', d) if isinstance(d, dict) else d
+    for c in items:
+        if c.get('name') == '$CRED_NAME':
+            print('exists'); break
+except: pass" 2>/dev/null || true)"
+
+    if [[ "$EXISTS" == "exists" ]]; then
+      log "  ✓ Credential '$CRED_NAME' already exists — updating not yet supported via API"
+      log "    To rotate token: delete in UI + re-run this addon"
+    else
+      PAYLOAD="$(SLACK_TOKEN="$SLACK_TOKEN" CRED_NAME="$CRED_NAME" python3 -c '
+import json, os
+print(json.dumps({
+  "name": os.environ["CRED_NAME"],
+  "type": "httpHeaderAuth",
+  "data": {
+    "name": "Authorization",
+    "value": "Bearer " + os.environ["SLACK_TOKEN"]
+  }
+}))')"
+      CODE="$(pct exec "$N8N_CTID" -- bash -lc "
+        echo '$PAYLOAD' | curl -sS -o /tmp/cred-resp.json -w '%{http_code}' \
+          -H 'X-N8N-API-KEY: $N8N_API_KEY' \
+          -H 'Content-Type: application/json' \
+          -X POST --data-binary @- \
+          http://localhost:5678/api/v1/credentials
+      ")"
+      if [[ "$CODE" =~ ^2 ]]; then
+        log "  ✓ Created credential '$CRED_NAME' (HTTP $CODE)"
+      else
+        warn "  Credential create returned HTTP $CODE"
+        pct exec "$N8N_CTID" -- cat /tmp/cred-resp.json 2>/dev/null | sed 's/^/    /' >&2 || true
+      fi
+      pct exec "$N8N_CTID" -- rm -f /tmp/cred-resp.json 2>/dev/null || true
+    fi
+  fi
+fi
+
+log " "
+log "n8n workflow:"
+log "  slack-mirror-sync.json ships with setup-n8n.sh's workflow auto-import."
+log "  If you ran setup-n8n.sh BEFORE this addon, re-import the workflow manually:"
+log "    1. n8n UI → Workflows → Import from File"
+log "    2. /root/td-proxmox/repo/addons/n8n/workflows/slack-mirror-sync.json"
+log "    3. Activate"
+log "  Otherwise it's already imported (inactive); just toggle Active in the UI."
 
 # ----- summary ---------------------------------------------------------------
 log "================================================================"
