@@ -7,6 +7,7 @@
 !.gitignore
 !README.md
 !TROUBLESHOOTING_LOG.md
+!manifest.yaml
 !bootstrap-fresh-pve.sh
 !automation/
 !addons/
