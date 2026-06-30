@@ -5,7 +5,10 @@
       "parameters": {
         "rule": {
           "interval": [
-            { "field": "cronExpression", "expression": "0 * * * *" }
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
           ]
         }
       },
@@ -13,7 +16,10 @@
       "name": "Hourly cron",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [240, 300]
+      "position": [
+        240,
+        300
+      ]
     },
     {
       "parameters": {
@@ -23,7 +29,10 @@
       "name": "Compute window",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [800, 300]
+      "position": [
+        800,
+        300
+      ]
     },
     {
       "parameters": {
@@ -35,9 +44,14 @@
       "name": "Read sync state",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [520, 300],
+      "position": [
+        520,
+        300
+      ],
       "credentials": {
-        "postgres": { "name": "Sobol Mirror (writer)" }
+        "postgres": {
+          "name": "Sobol Mirror (writer)"
+        }
       }
     },
     {
@@ -46,22 +60,42 @@
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
-            { "name": "types", "value": "public_channel,private_channel" },
-            { "name": "exclude_archived", "value": "false" },
-            { "name": "limit", "value": "200" }
+            {
+              "name": "types",
+              "value": "public_channel,private_channel"
+            },
+            {
+              "name": "exclude_archived",
+              "value": "false"
+            },
+            {
+              "name": "limit",
+              "value": "200"
+            }
           ]
         },
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "httpHeaderAuth",
-        "options": { "response": { "response": { "responseFormat": "json" } } }
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
       },
       "id": "ssssss04-1111-1111-1111-ssssssssssss",
       "name": "List channels",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1080, 200],
+      "position": [
+        1080,
+        200
+      ],
       "credentials": {
-        "httpHeaderAuth": { "name": "Slack (Sobol Sync) — Bearer" }
+        "httpHeaderAuth": {
+          "name": "Slack (Sobol Sync) — Bearer"
+        }
       }
     },
     {
@@ -70,20 +104,34 @@
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
-            { "name": "limit", "value": "200" }
+            {
+              "name": "limit",
+              "value": "200"
+            }
           ]
         },
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "httpHeaderAuth",
-        "options": { "response": { "response": { "responseFormat": "json" } } }
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
       },
       "id": "ssssss05-1111-1111-1111-ssssssssssss",
       "name": "List users",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1080, 400],
+      "position": [
+        1080,
+        400
+      ],
       "credentials": {
-        "httpHeaderAuth": { "name": "Slack (Sobol Sync) — Bearer" }
+        "httpHeaderAuth": {
+          "name": "Slack (Sobol Sync) — Bearer"
+        }
       }
     },
     {
@@ -94,7 +142,10 @@
       "name": "Format channels",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1360, 200]
+      "position": [
+        1360,
+        200
+      ]
     },
     {
       "parameters": {
@@ -104,7 +155,10 @@
       "name": "Format users",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1360, 400]
+      "position": [
+        1360,
+        400
+      ]
     },
     {
       "parameters": {
@@ -118,9 +172,14 @@
       "name": "Upsert channels",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [1640, 200],
+      "position": [
+        1640,
+        200
+      ],
       "credentials": {
-        "postgres": { "name": "Sobol Mirror (writer)" }
+        "postgres": {
+          "name": "Sobol Mirror (writer)"
+        }
       }
     },
     {
@@ -135,9 +194,14 @@
       "name": "Upsert users",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [1640, 400],
+      "position": [
+        1640,
+        400
+      ],
       "credentials": {
-        "postgres": { "name": "Sobol Mirror (writer)" }
+        "postgres": {
+          "name": "Sobol Mirror (writer)"
+        }
       }
     },
     {
@@ -148,7 +212,10 @@
       "name": "Plan message fetches",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1920, 300]
+      "position": [
+        1920,
+        300
+      ]
     },
     {
       "parameters": {
@@ -156,23 +223,46 @@
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
-            { "name": "channel", "value": "={{$json.channel_id}}" },
-            { "name": "oldest", "value": "={{$json.oldest}}" },
-            { "name": "latest", "value": "={{$json.latest}}" },
-            { "name": "limit", "value": "200" }
+            {
+              "name": "channel",
+              "value": "={{$json.channel_id}}"
+            },
+            {
+              "name": "oldest",
+              "value": "={{$json.oldest}}"
+            },
+            {
+              "name": "latest",
+              "value": "={{$json.latest}}"
+            },
+            {
+              "name": "limit",
+              "value": "200"
+            }
           ]
         },
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "httpHeaderAuth",
-        "options": { "response": { "response": { "responseFormat": "json" } } }
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
       },
       "id": "ssssss11-1111-1111-1111-ssssssssssss",
       "name": "Fetch channel history",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2200, 300],
+      "position": [
+        2200,
+        300
+      ],
       "credentials": {
-        "httpHeaderAuth": { "name": "Slack (Sobol Sync) — Bearer" }
+        "httpHeaderAuth": {
+          "name": "Slack (Sobol Sync) — Bearer"
+        }
       }
     },
     {
@@ -183,7 +273,10 @@
       "name": "Format messages",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2480, 300]
+      "position": [
+        2480,
+        300
+      ]
     },
     {
       "parameters": {
@@ -197,9 +290,14 @@
       "name": "Upsert messages",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2760, 300],
+      "position": [
+        2760,
+        300
+      ],
       "credentials": {
-        "postgres": { "name": "Sobol Mirror (writer)" }
+        "postgres": {
+          "name": "Sobol Mirror (writer)"
+        }
       }
     },
     {
@@ -214,72 +312,147 @@
       "name": "Update sync state",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [3040, 300],
+      "position": [
+        3040,
+        300
+      ],
       "credentials": {
-        "postgres": { "name": "Sobol Mirror (writer)" }
+        "postgres": {
+          "name": "Sobol Mirror (writer)"
+        }
       }
     }
   ],
   "connections": {
     "Hourly cron": {
       "main": [
-        [{ "node": "Read sync state", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Read sync state",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Read sync state": {
       "main": [
-        [{ "node": "Compute window", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Compute window",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Compute window": {
       "main": [
         [
-          { "node": "List channels", "type": "main", "index": 0 },
-          { "node": "List users", "type": "main", "index": 0 }
+          {
+            "node": "List channels",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "List users",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "List channels": {
       "main": [
-        [{ "node": "Format channels", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Format channels",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "List users": {
       "main": [
-        [{ "node": "Format users", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Format users",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Format channels": {
       "main": [
         [
-          { "node": "Upsert channels", "type": "main", "index": 0 },
-          { "node": "Plan message fetches", "type": "main", "index": 0 }
+          {
+            "node": "Upsert channels",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Plan message fetches",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "Format users": {
       "main": [
-        [{ "node": "Upsert users", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Upsert users",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Plan message fetches": {
       "main": [
-        [{ "node": "Fetch channel history", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Fetch channel history",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Fetch channel history": {
       "main": [
-        [{ "node": "Format messages", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Format messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Format messages": {
       "main": [
-        [{ "node": "Upsert messages", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Upsert messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Upsert messages": {
       "main": [
-        [{ "node": "Update sync state", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Update sync state",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
@@ -287,8 +460,26 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "tags": ["sobol-mirror", "connector", "slack", "starter"],
+  "tags": [
+    "sobol-mirror",
+    "connector",
+    "slack",
+    "starter"
+  ],
   "meta": {
-    "description": "Hourly Slack mirror sync for Sobol Mirror. Reads conversations.list + users.list + conversations.history for each non-archived channel, upserts into slack.channels/users/messages in the sobol_mirror Postgres DB. Imported but inactive — operator activates after binding Postgres credentials ('Sobol Mirror (writer)') and providing SLACK_BOT_TOKEN env var to n8n. First run with backfill_days=30 (configurable via SLACK_BACKFILL_DAYS env var) pulls ~30 days of history; subsequent runs use cursor from _meta.sync_state for incremental. See repo/addons/setup-connector-slack.sh for setup details. Companion: comms-agent persona reads from agent_view.slack_* views populated by this data."
+    "description": "Hourly Slack mirror sync for Sobol Mirror. Reads conversations.list + users.list + conversations.history for each non-archived channel, upserts into slack.channels/users/messages in the sobol_mirror Postgres DB. Imported but inactive — operator activates after binding Postgres credentials ('Sobol Mirror (writer)') and providing SLACK_BOT_TOKEN env var to n8n. First run with backfill_days=30 (configurable via SLACK_BACKFILL_DAYS env var) pulls ~30 days of history; subsequent runs use cursor from _meta.sync_state for incremental. See repo/addons/setup-connector-slack.sh for setup details. Companion: comms-agent persona reads from agent_view.slack_* views populated by this data.",
+    "stack_dependencies": {
+      "required_apps": [
+        "n8n",
+        "postgres-mirror",
+        "connector-slack"
+      ],
+      "optional_apps": [],
+      "required_features": []
+    },
+    "addon_dependencies": [
+      "setup-postgres-mirror",
+      "setup-connector-slack"
+    ]
   }
 }

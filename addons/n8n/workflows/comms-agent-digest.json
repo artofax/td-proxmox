@@ -5,7 +5,10 @@
       "parameters": {
         "rule": {
           "interval": [
-            { "field": "cronExpression", "expression": "0 9 * * *" }
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
           ]
         }
       },
@@ -13,7 +16,10 @@
       "name": "Daily 9am",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [240, 300]
+      "position": [
+        240,
+        300
+      ]
     },
     {
       "parameters": {
@@ -26,7 +32,10 @@
       "name": "Manual trigger (webhook)",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [240, 500],
+      "position": [
+        240,
+        500
+      ],
       "webhookId": "comms-agent-digest"
     },
     {
@@ -39,9 +48,14 @@
       "name": "Gather digest data",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [520, 400],
+      "position": [
+        520,
+        400
+      ],
       "credentials": {
-        "postgres": { "name": "Sobol Mirror (read-only)" }
+        "postgres": {
+          "name": "Sobol Mirror (read-only)"
+        }
       }
     },
     {
@@ -52,18 +66,28 @@
       "name": "Build LLM prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [800, 400]
+      "position": [
+        800,
+        400
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "typeValidation": "loose" },
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
           "conditions": [
             {
               "id": "skip-gate",
               "leftValue": "={{$json.skip}}",
               "rightValue": "",
-              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -74,7 +98,10 @@
       "name": "Should we call LLM?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [1080, 400]
+      "position": [
+        1080,
+        400
+      ]
     },
     {
       "parameters": {
@@ -83,7 +110,11 @@
         "specifyBody": "json",
         "jsonBody": "={\n  \"model\": \"{{$env.COMMS_AGENT_MODEL || 'qwen2.5:14b'}}\",\n  \"messages\": [\n    {\"role\": \"system\", \"content\": {{JSON.stringify($json.system_prompt)}} },\n    {\"role\": \"user\", \"content\": {{JSON.stringify($json.user_prompt)}} }\n  ],\n  \"stream\": false,\n  \"options\": {\n    \"temperature\": 0.3,\n    \"num_predict\": 800\n  }\n}",
         "options": {
-          "response": { "response": { "responseFormat": "json" } },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
           "timeout": 120000
         }
       },
@@ -91,7 +122,10 @@
       "name": "Call Ollama",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1360, 300]
+      "position": [
+        1360,
+        300
+      ]
     },
     {
       "parameters": {
@@ -101,7 +135,10 @@
       "name": "Extract digest text",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1640, 300]
+      "position": [
+        1640,
+        300
+      ]
     },
     {
       "parameters": {
@@ -114,9 +151,14 @@
       "name": "Post digest to Mattermost",
       "type": "n8n-nodes-base.mattermost",
       "typeVersion": 1,
-      "position": [1920, 300],
+      "position": [
+        1920,
+        300
+      ],
       "credentials": {
-        "mattermostApi": { "name": "Mattermost (pi-bot)" }
+        "mattermostApi": {
+          "name": "Mattermost (pi-bot)"
+        }
       }
     },
     {
@@ -130,9 +172,14 @@
       "name": "Post skip-notice to Mattermost",
       "type": "n8n-nodes-base.mattermost",
       "typeVersion": 1,
-      "position": [1360, 500],
+      "position": [
+        1360,
+        500
+      ],
       "credentials": {
-        "mattermostApi": { "name": "Mattermost (pi-bot)" }
+        "mattermostApi": {
+          "name": "Mattermost (pi-bot)"
+        }
       }
     },
     {
@@ -147,9 +194,14 @@
       "name": "Log to agent_actions",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2200, 300],
+      "position": [
+        2200,
+        300
+      ],
       "credentials": {
-        "postgres": { "name": "Sobol Mirror (read-only)" }
+        "postgres": {
+          "name": "Sobol Mirror (read-only)"
+        }
       }
     },
     {
@@ -162,59 +214,128 @@
       "name": "Respond (manual trigger)",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [2480, 300]
+      "position": [
+        2480,
+        300
+      ]
     }
   ],
   "connections": {
     "Daily 9am": {
       "main": [
-        [{ "node": "Gather digest data", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Gather digest data",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Manual trigger (webhook)": {
       "main": [
-        [{ "node": "Gather digest data", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Gather digest data",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Gather digest data": {
       "main": [
-        [{ "node": "Build LLM prompt", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Build LLM prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Build LLM prompt": {
       "main": [
-        [{ "node": "Should we call LLM?", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Should we call LLM?",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Should we call LLM?": {
       "main": [
-        [{ "node": "Call Ollama", "type": "main", "index": 0 }],
-        [{ "node": "Post skip-notice to Mattermost", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Call Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Post skip-notice to Mattermost",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Call Ollama": {
       "main": [
-        [{ "node": "Extract digest text", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Extract digest text",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Extract digest text": {
       "main": [
-        [{ "node": "Post digest to Mattermost", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Post digest to Mattermost",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Post digest to Mattermost": {
       "main": [
-        [{ "node": "Log to agent_actions", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Log to agent_actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Post skip-notice to Mattermost": {
       "main": [
-        [{ "node": "Log to agent_actions", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Log to agent_actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Log to agent_actions": {
       "main": [
-        [{ "node": "Respond (manual trigger)", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Respond (manual trigger)",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
@@ -222,8 +343,31 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "tags": ["sobol-mirror", "comms-agent", "digest", "starter"],
+  "tags": [
+    "sobol-mirror",
+    "comms-agent",
+    "digest",
+    "starter"
+  ],
   "meta": {
-    "description": "Daily 9am Slack digest from the comms-agent persona. Reads agent_view.slack_* views from the sobol_mirror postgres, passes the aggregated JSON to Ollama with the persona's system prompt embedded, posts the digest to Mattermost (default channel: bot; configurable via COMMS_AGENT_MM_CHANNEL env var). Skips with explanatory message when sync is stale (>120 min) or message volume is zero. Logs every execution to _meta.agent_actions for audit. Also exposes a webhook trigger at POST /webhook/comms-agent-digest for manual on-demand digests during development. Default model: qwen2.5:14b (configurable via COMMS_AGENT_MODEL env var). Requires: setup-postgres-mirror.sh, setup-connector-slack.sh, slack-mirror-sync.json activated and at least one successful sync. Companion to pi-personas/comms-agent/ — the persona definition + this workflow together = the runtime."
+    "description": "Daily 9am Slack digest from the comms-agent persona. Reads agent_view.slack_* views from the sobol_mirror postgres, passes the aggregated JSON to Ollama with the persona's system prompt embedded, posts the digest to Mattermost (default channel: bot; configurable via COMMS_AGENT_MM_CHANNEL env var). Skips with explanatory message when sync is stale (>120 min) or message volume is zero. Logs every execution to _meta.agent_actions for audit. Also exposes a webhook trigger at POST /webhook/comms-agent-digest for manual on-demand digests during development. Default model: qwen2.5:14b (configurable via COMMS_AGENT_MODEL env var). Requires: setup-postgres-mirror.sh, setup-connector-slack.sh, slack-mirror-sync.json activated and at least one successful sync. Companion to pi-personas/comms-agent/ — the persona definition + this workflow together = the runtime.",
+    "stack_dependencies": {
+      "required_apps": [
+        "mattermost",
+        "n8n",
+        "ollama-pi-agent",
+        "postgres-mirror"
+      ],
+      "optional_apps": [
+        "connector-slack"
+      ],
+      "required_features": []
+    },
+    "addon_dependencies": [
+      "setup-mattermost",
+      "setup-ollama-pi",
+      "setup-postgres-mirror",
+      "setup-connector-slack"
+    ]
   }
 }

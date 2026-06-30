@@ -12,7 +12,10 @@
       "name": "Gitea webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [240, 300],
+      "position": [
+        240,
+        300
+      ],
       "webhookId": "td-gitea-events"
     },
     {
@@ -23,7 +26,10 @@
       "name": "Format event",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [520, 300]
+      "position": [
+        520,
+        300
+      ]
     },
     {
       "parameters": {
@@ -53,7 +59,10 @@
       "name": "Should we post?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [800, 300]
+      "position": [
+        800,
+        300
+      ]
     },
     {
       "parameters": {
@@ -66,7 +75,10 @@
       "name": "Post to Mattermost",
       "type": "n8n-nodes-base.mattermost",
       "typeVersion": 1,
-      "position": [1080, 220],
+      "position": [
+        1080,
+        220
+      ],
       "credentials": {
         "mattermostApi": {
           "name": "Mattermost (pi-bot)"
@@ -83,7 +95,10 @@
       "name": "Respond (posted)",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1360, 220]
+      "position": [
+        1360,
+        220
+      ]
     },
     {
       "parameters": {
@@ -95,7 +110,10 @@
       "name": "Respond (skipped)",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1080, 420]
+      "position": [
+        1080,
+        420
+      ]
     }
   ],
   "connections": {
@@ -155,8 +173,25 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "tags": ["td-proxmox", "starter", "gitea", "mattermost"],
+  "tags": [
+    "td-proxmox",
+    "starter",
+    "gitea",
+    "mattermost"
+  ],
   "meta": {
-    "description": "Receives Gitea system webhook events at POST /webhook/gitea-events and posts a formatted Mattermost message for push, PR opened/closed/merged/reopened, PR review (approve/reject), issue opened/closed/reopened, issue comments, releases, branch/tag create, repo create/delete, and forks. To wire up: in Gitea as admin, Site Administration → Webhooks → Add Webhook (Gitea). URL: http://n8n:5678/webhook/gitea-events. HTTP Method: POST. Content Type: application/json. Trigger On: 'Send Everything' (or pick specific events). Active: yes. Default destination channel is town-square — edit the Mattermost node's channelId to route elsewhere."
+    "description": "Receives Gitea system webhook events at POST /webhook/gitea-events and posts a formatted Mattermost message for push, PR opened/closed/merged/reopened, PR review (approve/reject), issue opened/closed/reopened, issue comments, releases, branch/tag create, repo create/delete, and forks. To wire up: in Gitea as admin, Site Administration → Webhooks → Add Webhook (Gitea). URL: http://n8n:5678/webhook/gitea-events. HTTP Method: POST. Content Type: application/json. Trigger On: 'Send Everything' (or pick specific events). Active: yes. Default destination channel is town-square — edit the Mattermost node's channelId to route elsewhere.",
+    "stack_dependencies": {
+      "required_apps": [
+        "mattermost",
+        "n8n",
+        "gitea"
+      ],
+      "optional_apps": [],
+      "required_features": []
+    },
+    "addon_dependencies": [
+      "setup-mattermost"
+    ]
   }
 }

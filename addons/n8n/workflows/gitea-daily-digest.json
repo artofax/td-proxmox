@@ -16,7 +16,10 @@
       "name": "Daily 9am",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [240, 300]
+      "position": [
+        240,
+        300
+      ]
     },
     {
       "parameters": {
@@ -29,7 +32,10 @@
       "name": "List Gitea repos",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [520, 300],
+      "position": [
+        520,
+        300
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "name": "Gitea (admin) — Bearer"
@@ -44,7 +50,10 @@
       "name": "Filter recent",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [800, 300]
+      "position": [
+        800,
+        300
+      ]
     },
     {
       "parameters": {
@@ -57,7 +66,10 @@
       "name": "Fetch commits per repo",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1080, 300],
+      "position": [
+        1080,
+        300
+      ],
       "onError": "continueRegularOutput",
       "credentials": {
         "httpHeaderAuth": {
@@ -73,7 +85,10 @@
       "name": "Format digest",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1360, 300]
+      "position": [
+        1360,
+        300
+      ]
     },
     {
       "parameters": {
@@ -86,7 +101,10 @@
       "name": "Post to Mattermost",
       "type": "n8n-nodes-base.mattermost",
       "typeVersion": 1,
-      "position": [1640, 300],
+      "position": [
+        1640,
+        300
+      ],
       "credentials": {
         "mattermostApi": {
           "name": "Mattermost (pi-bot)"
@@ -155,8 +173,24 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "tags": ["td-proxmox", "starter", "scheduled"],
+  "tags": [
+    "td-proxmox",
+    "starter",
+    "scheduled"
+  ],
   "meta": {
-    "description": "Cron 9am daily → list Gitea repos updated in last 24h → fetch their commits → post a digest in Mattermost #town-square. Uses an HTTP Header Auth credential named 'Gitea (admin) — Bearer' because n8n's native Gitea node is search/repo focused and the Gitea PAT works as 'Authorization: token <PAT>' on any endpoint. If you want a different cadence, edit the schedule trigger expression."
+    "description": "Cron 9am daily → list Gitea repos updated in last 24h → fetch their commits → post a digest in Mattermost #town-square. Uses an HTTP Header Auth credential named 'Gitea (admin) — Bearer' because n8n's native Gitea node is search/repo focused and the Gitea PAT works as 'Authorization: token <PAT>' on any endpoint. If you want a different cadence, edit the schedule trigger expression.",
+    "stack_dependencies": {
+      "required_apps": [
+        "mattermost",
+        "n8n",
+        "gitea"
+      ],
+      "optional_apps": [],
+      "required_features": []
+    },
+    "addon_dependencies": [
+      "setup-mattermost"
+    ]
   }
 }

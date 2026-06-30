@@ -12,7 +12,10 @@
       "name": "Mattermost outgoing webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [240, 300],
+      "position": [
+        240,
+        300
+      ],
       "webhookId": "td-mm-chat"
     },
     {
@@ -42,7 +45,10 @@
       "name": "Skip if bot wrote it",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [520, 300]
+      "position": [
+        520,
+        300
+      ]
     },
     {
       "parameters": {
@@ -59,7 +65,10 @@
       "name": "Ollama (HTTP /api/chat)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [800, 200]
+      "position": [
+        800,
+        200
+      ]
     },
     {
       "parameters": {
@@ -71,7 +80,10 @@
       "name": "Reply to Mattermost",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1080, 200]
+      "position": [
+        1080,
+        200
+      ]
     },
     {
       "parameters": {
@@ -82,7 +94,10 @@
       "name": "Ignore (bot loop guard)",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [800, 420]
+      "position": [
+        800,
+        420
+      ]
     }
   ],
   "connections": {
@@ -131,8 +146,25 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "tags": ["td-proxmox", "starter", "ai"],
+  "tags": [
+    "td-proxmox",
+    "starter",
+    "ai"
+  ],
   "meta": {
-    "description": "Mattermost outgoing webhook → Ollama HTTP /api/chat → reply. No credential needed for Ollama (it's an unauthenticated local service on the tailnet). To wire up: in Mattermost as admin, your avatar → Integrations → Outgoing Webhooks → Add. Content type: application/json. Callback URL: http://n8n:5678/webhook/mm-chat (or your tailnet host). Trigger words: '!ai' or leave empty to fire on every message in the chosen channel. Loop guard: skips if user_name == 'pi-bot' so the bot doesn't talk to itself."
+    "description": "Mattermost outgoing webhook → Ollama HTTP /api/chat → reply. No credential needed for Ollama (it's an unauthenticated local service on the tailnet). To wire up: in Mattermost as admin, your avatar → Integrations → Outgoing Webhooks → Add. Content type: application/json. Callback URL: http://n8n:5678/webhook/mm-chat (or your tailnet host). Trigger words: '!ai' or leave empty to fire on every message in the chosen channel. Loop guard: skips if user_name == 'pi-bot' so the bot doesn't talk to itself.",
+    "stack_dependencies": {
+      "required_apps": [
+        "mattermost",
+        "n8n",
+        "ollama-pi-agent"
+      ],
+      "optional_apps": [],
+      "required_features": []
+    },
+    "addon_dependencies": [
+      "setup-mattermost",
+      "setup-ollama-pi"
+    ]
   }
 }

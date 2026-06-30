@@ -12,7 +12,10 @@
       "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [240, 300],
+      "position": [
+        240,
+        300
+      ],
       "webhookId": "td-hello-mm"
     },
     {
@@ -26,7 +29,10 @@
       "name": "Mattermost (pi-bot)",
       "type": "n8n-nodes-base.mattermost",
       "typeVersion": 1,
-      "position": [520, 300],
+      "position": [
+        520,
+        300
+      ],
       "credentials": {
         "mattermostApi": {
           "name": "Mattermost (pi-bot)"
@@ -43,7 +49,10 @@
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [800, 300]
+      "position": [
+        800,
+        300
+      ]
     }
   ],
   "connections": {
@@ -74,8 +83,22 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "tags": ["td-proxmox", "starter"],
+  "tags": [
+    "td-proxmox",
+    "starter"
+  ],
   "meta": {
-    "description": "Smoke test that the Mattermost credential works. POST anything to /webhook/hello and watch the bot post into the town-square channel. If the channel ID is wrong for your install, edit the Mattermost node — channelId can be a channel slug ('town-square') or a 26-char UUID."
+    "description": "Smoke test that the Mattermost credential works. POST anything to /webhook/hello and watch the bot post into the town-square channel. If the channel ID is wrong for your install, edit the Mattermost node — channelId can be a channel slug ('town-square') or a 26-char UUID.",
+    "stack_dependencies": {
+      "required_apps": [
+        "mattermost",
+        "n8n"
+      ],
+      "optional_apps": [],
+      "required_features": []
+    },
+    "addon_dependencies": [
+      "setup-mattermost"
+    ]
   }
 }
