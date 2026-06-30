@@ -1,11 +1,25 @@
-# CLAUDE.md — `repo/` (TD-Proxmox framework + reference stack)
+# CLAUDE.md — `repo/` (TD-Proxmox — FROZEN PUBLIC ARCHIVE)
 
-You're inside the TD-Proxmox framework repo — the foundation stack and
-addon library that other Sobol Data stacks inherit from. Public on
-GitHub (`github.com/artofax/td-proxmox`) + mirrored to Gitea.
+> ## ⚠️ This is the frozen public archive. Do NOT add new work here.
+>
+> This repo (`github.com/artofax/td-proxmox`) is the trading-group
+> reference build, frozen at tag **`v1.0.0-archive`**. Active Sobol
+> Foundation development continues in the sibling **`../sobol-foundation/`**
+> working tree, which pushes to the private Gitea repo
+> `td/sobol-foundation`.
+>
+> **If you're here to add an addon, update bootstrap, patch a workflow,
+> or fix anything — work in `../sobol-foundation/` instead.**
+>
+> What this repo is still good for:
+> - Reading the v1.0.0 reference implementation
+> - Pulling history (`git log`) when you want to understand "how did
+>   we end up at the archive snapshot"
+> - The trading-group share link still works
 
 For project-wide context, the parent `../CLAUDE.md` is loaded automatically.
-This file adds tactical context specific to working in this repo.
+This file documents what's IN the archive — for the active-dev guide
+see `../sobol-foundation/CLAUDE.md`.
 
 ## What lives here
 
