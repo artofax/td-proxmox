@@ -354,6 +354,32 @@ resolve_sshkey() {
   log "SSH key staged at $SSHKEY_FILE (will be wiped on exit)."
 }
 
+# ----- locate tokens file ---------------------------------------------------
+# Read TS_AUTHKEY and CT_PASSWORD from a tokens file before falling back to
+# interactive prompts. Lets firstboot.sh / automation pass secrets via file
+# instead of CLI flags (CLI flags are visible in 'ps aux' to anyone who can
+# shell on the host — a real concern when we ship to paying customers).
+_locate_tokens_file() {
+  if [[ -n "${TOKENS_FILE:-}" && -f "$TOKENS_FILE" ]]; then
+    printf '%s\n' "$TOKENS_FILE"; return
+  fi
+  for f in /root/td-tokens.txt /root/studio-tokens.txt /root/sobol-tokens.txt /root/founder-tokens.txt; do
+    [[ -f "$f" ]] && { printf '%s\n' "$f"; return; }
+  done
+  return 1
+}
+
+_read_token() {
+  local key="$1" tf v
+  tf="$(_locate_tokens_file)" || return 1
+  v="$(awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, "", $0); val = $0 } END { print val }' "$tf")"
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in
+    "<"*">"|""|"REPLACE_ME"|"CHANGEME") return 1 ;;
+  esac
+  printf '%s\n' "$v"
+}
+
 # ----- resolve Tailscale auth key -------------------------------------------
 resolve_tsauthkey() {
   if [[ -n "$TS_AUTHKEY" ]]; then return; fi
@@ -368,6 +394,16 @@ resolve_tsauthkey() {
   if (( DRY_RUN )); then
     TS_AUTHKEY="tskey-auth-DRY_RUN_PLACEHOLDER"
     log "Dry-run: using placeholder Tailscale auth key."
+    return
+  fi
+
+  # Try tokens file first (unattended use case). Avoids putting the key
+  # on the command line where 'ps aux' can see it.
+  local fromfile
+  if fromfile="$(_read_token TS_AUTHKEY 2>/dev/null)" && \
+     [[ "$fromfile" =~ ^tskey-(auth|client)- ]]; then
+    TS_AUTHKEY="$fromfile"
+    log "Resolved TS_AUTHKEY from $(_locate_tokens_file)"
     return
   fi
 
@@ -396,6 +432,14 @@ resolve_ct_password() {
   if (( DRY_RUN )); then
     CT_PASSWORD="dry-run-placeholder-pw"
     log "Dry-run: using placeholder CT password."
+    return
+  fi
+
+  # Try tokens file first (unattended use case). Avoids exposing in 'ps aux'.
+  local fromfile
+  if fromfile="$(_read_token CT_PASSWORD 2>/dev/null)" && [[ ${#fromfile} -ge 8 ]]; then
+    CT_PASSWORD="$fromfile"
+    log "Resolved CT_PASSWORD from $(_locate_tokens_file)"
     return
   fi
 
